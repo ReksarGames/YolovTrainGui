@@ -1,0 +1,32 @@
+@startuml
+rectangle "Main Window" {
+    rectangle "Classes Configuration" {
+        "Select classes: " : Enter class names
+        "Add Class Button" : Add a new class to list
+        "Remove Class Button" : Remove a class from list
+        "Class Input Field" : Enter class name
+        "model_path" : Enter path to model
+    }
+
+    rectangle "Actions" {
+        "Start Data Collection" : Click to start collecting data
+        "Split Dataset Button" : Click to split dataset
+        "Train YOLO Button" : Click to start training model
+    }
+
+    rectangle "Auto Dataset Collector" {
+        "Grabber list" : Select model
+        "Width" : Input field for width
+        "Height" : Input field for height
+        "Save interval" : Input field for save interval
+        "Detection threshold" : Input field for detection threshold
+        "Back" : Back to Main Window
+    }
+
+    rectangle "Label Config" {
+        "Start Label GUI" : Start Label GUI
+        "Back" : Back to Main Window
+    }
+}
+
+@enduml
