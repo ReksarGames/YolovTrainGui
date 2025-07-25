@@ -5,3 +5,4 @@ runs/
 .idea/
 .venv/
 __pycache__/
+/models/
