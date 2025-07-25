@@ -1,0 +1,16 @@
+{
+    "model_path": "models/sunxds_0.7.6.pt",
+    "classes": [
+        "class_player",
+        "class_head"
+    ],
+    "grabber": {
+        "crop_size": 0.8,
+        "width": 640,
+        "height": 640
+    },
+    "output_folder": "dataset_output",
+    "save_interval": 3,
+    "detection_threshold": 0.5,
+    "data_folder": "dataset_output"
+}
