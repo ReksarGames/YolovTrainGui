@@ -13,6 +13,5 @@
     "save_interval": 3,
     "detection_threshold": 0.5,
     "data_folder": "dataset_output",
-    "images_folder": "images",
-    "labels_folder": "labels"
+    "last_data_yaml": "datasets/Valorant/data.yaml"
 }

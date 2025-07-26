@@ -58,8 +58,8 @@ def load_config(config_file="config.json"):
 # Функция для выполнения действия Split
 def perform_split(config):
     # Параметры из конфигурации
-    images_dir = os.path.join(config["data_folder"], "augmented_images")
-    labels_dir = os.path.join(config["data_folder"], "augmented_labels")
+    images_dir = os.path.join(config["data_folder"], config.get("images_folder", "images"))
+    labels_dir = os.path.join(config["data_folder"], config.get("labels_folder", "labels"))
 
     # Папка для вывода результата
     split_output_dir = os.path.join(config["data_folder"], "split_dataset")
