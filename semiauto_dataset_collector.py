@@ -1,165 +1,125 @@
+import os
 import time
+import json
+import logging
 import cv2
 import numpy as np
-import os
-import json
 from datetime import datetime
 from ultralytics import YOLO
-import mss  # Используем только mss для захвата экрана
-from screeninfo import get_monitors  # Для получения размера экрана
-import logging
-
+import mss
+from screeninfo import get_monitors
 
 class ScreenCapture:
-    def __init__(self, config, output_folder):
+    """
+    Класс для захвата экрана, детекции и сохранения данных.
+    Всё «тяжёлое» работает внутри capture_and_display();
+    его можно запустить напрямую через метод run().
+    """
+    def __init__(self, config, output_folder, log_callback=print):
         self.config = config
         self.output_folder = output_folder
-        self.stop_flag = False
-        self.saved_frame_count = 0
-        self.region = None
-        self.camera = None
-        self.target_classes = config["classes"]  # Извлекаем целевые классы из конфига
-        self.last_detection_time = 0  # Время последней детекции для контроля вывода
-        self.last_save_time = 0  # Время последнего сохранения
+        self.log = log_callback
 
-        # Загружаем модель с оптимизацией для производительности (например, FP16 для повышения скорости)
-        self.model = YOLO(self.config["model_path"], verbose=False).to('cuda').half()  # Используем FP16 для ускорения
+        self.stop_flag = False
+        self.last_detection_time = 0
+
+        # Загружаем модель в FP16 на CUDA
+        self.model = YOLO(self.config["model_path"], verbose=False).to('cuda').half()
 
     def create_folders(self):
-        # Проверяем, существуют ли папки, и если нет, создаем их
         os.makedirs(os.path.join(self.output_folder, 'images'), exist_ok=True)
         os.makedirs(os.path.join(self.output_folder, 'labels'), exist_ok=True)
 
     def capture_init(self):
-        # Получаем текущий размер экрана
-        monitor = get_monitors()[0]  # Получаем первый монитор
-        screen_width = monitor.width
-        screen_height = monitor.height
-
-        # Задаем размер области захвата
-        crop_width = self.config["grabber"]["width"]
-        crop_height = self.config["grabber"]["height"]
-
-        # Центральная область экрана для захвата
-        x = (screen_width - crop_width) // 2
-        y = (screen_height - crop_height) // 2
-        self.region = {'top': y, 'left': x, 'width': crop_width, 'height': crop_height}
+        mon = get_monitors()[0]
+        sw, sh = mon.width, mon.height
+        cw = self.config["grabber"]["width"]
+        ch = self.config["grabber"]["height"]
+        x = (sw - cw) // 2
+        y = (sh - ch) // 2
+        self.region = {'top': y, 'left': x, 'width': cw, 'height': ch}
         self.camera = mss.mss()
-
-        # Выводим информацию о размере экрана
-        print(f"[INFO] Screen resolution: {screen_width}x{screen_height}")
-        print(f"[INFO] Capturing region: {self.region}")
+        self.log(f"[INFO] Screen resolution: {sw}x{sh}")
+        self.log(f"[INFO] Capturing region: {self.region}")
 
     def take_shot(self):
-        # Захват изображения с помощью mss
         img = self.camera.grab(self.region)
-        img = np.array(img)
-        return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        arr = np.array(img)
+        return cv2.cvtColor(arr, cv2.COLOR_BGRA2BGR)
 
-    def save_image_and_labels(self, frame, results, output_folder):
-        timestamp = datetime.now().strftime('%Y%m%d%H%M%S%f')
-        img_name = f'{timestamp}.jpg'
-        label_name = f'{timestamp}.txt'
+    def save_image_and_labels(self, frame, results):
+        ts = datetime.now().strftime('%Y%m%d%H%M%S%f')
+        img_path = os.path.join(self.output_folder, 'images',  f'{ts}.jpg')
+        lbl_path = os.path.join(self.output_folder, 'labels', f'{ts}.txt')
 
-        # Сохраняем изображение
-        img_bgr = frame  # Сохраняем в оригинальных цветах (BGR)
-        img_path = os.path.join(output_folder, 'images', img_name)
-        cv2.imwrite(img_path, img_bgr)
-
-        # Сохраняем метки в формате YOLO
-        label_path = os.path.join(output_folder, 'labels', label_name)
-        with open(label_path, 'w') as f:
+        cv2.imwrite(img_path, frame)
+        with open(lbl_path, 'w') as f:
             for box in results[0].boxes:
-                cls = int(box.cls)  # Класс объекта
-                x_center, y_center, width, height = box.xywh[0]  # Получаем координаты и размер бокса
+                cls = int(box.cls)
+                x_c, y_c, w, h = box.xywh[0]
+                x_c /= frame.shape[1]
+                y_c /= frame.shape[0]
+                w   /= frame.shape[1]
+                h   /= frame.shape[0]
+                f.write(f"{cls} {x_c} {y_c} {w} {h}\n")
 
-                # Нормализация координат относительно размеров изображения
-                x_center /= frame.shape[1]
-                y_center /= frame.shape[0]
-                width /= frame.shape[1]
-                height /= frame.shape[0]
-
-                # Записываем метку в файл
-                f.write(f"{cls} {x_center} {y_center} {width} {height}\n")
-
-        print(f"[INFO] Saved image and label: {img_name}, {label_name}")  # Общая информация
+        self.log(f"[INFO] Saved image and label: {os.path.basename(img_path)}, {os.path.basename(lbl_path)}")
 
     def draw_boxes(self, frame, results):
-        # Рисуем боксы на изображении
-        annotated_img = frame.copy()
+        img = frame.copy()
         for box in results[0].boxes:
-            class_id = int(box.cls)
-            # Пропускаем классы, которые не являются целевыми
-            if class_id not in self.target_classes:
+            cls = int(box.cls)
+            if cls not in self.config["classes"]:
                 continue
             x1, y1, x2, y2 = map(int, box.xyxy[0])
-            cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            # Используем .item() для извлечения числа из тензора
-            label = f"{class_id} {box.conf.item():.2f}"
-            cv2.putText(annotated_img, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-        return annotated_img
+            cv2.rectangle(img, (x1, y1), (x2, y2), (0,255,0), 2)
+            conf = box.conf.item()
+            cv2.putText(img, f"{cls} {conf:.2f}", (x1, y1-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+        return img
 
     def capture_and_display(self):
+        # Основной цикл: инициализация → захват → детекция → сохранение → отображение
         self.capture_init()
         self.create_folders()
-
-        # Отключаем логирование, чтобы избежать лишнего вывода
-        logging.getLogger("ultralytics").setLevel(logging.ERROR)  # Отключаем логирование от YOLO
+        logging.getLogger("ultralytics").setLevel(logging.ERROR)
 
         while not self.stop_flag:
-            # Захват кадра с задержкой
             frame = self.take_shot()
+            rgb   = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = self.model(rgb)
 
-            # Анализ изображения с помощью модели (с задержкой)
-            img_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = self.model(img_rgb)
+            if results and len(results[0].boxes) > 0:
+                now = time.time()
+                if now - self.last_detection_time > 1:
+                    self.save_image_and_labels(frame, results)
+                    self.last_detection_time = now
 
-            # Если есть детекции
-            if len(results[0].boxes) > 0:
-                current_time = time.time()
+                    annotated = self.draw_boxes(frame, results)
+                    cv2.imshow("Detection Result", annotated)
+                    self.log(f"[INFO] Detections: {len(results[0].boxes)}")
 
-                # Добавляем контроль времени для вывода в консоль (раз в 1 секунду)
-                if current_time - self.last_detection_time > 1:  # 1 секунда между выводами
-                    # Сохраняем изображение и метки
-                    self.save_image_and_labels(frame, results, self.output_folder)
-                    self.last_detection_time = current_time  # Обновляем время последней детекции
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                self.stop_flag = True
 
-                    # Рисуем боксы на изображении
-                    annotated_img = self.draw_boxes(frame, results)
-
-                    # Отображаем изображение с аннотированными боксами
-                    cv2.imshow("Detection Result", annotated_img)
-
-                    # Логируем только если есть детекции
-                    print(f"[INFO] Detections found: {len(results[0].boxes)}")
-
-            # Добавляем небольшую задержку, чтобы избежать перегрузки процессора
             time.sleep(0.01)
 
-            # Выход по нажатию клавиши 'q'
-            key = cv2.waitKey(1) & 0xFF
-            if key == ord('q'):
-                self.stop_flag = True
-                break
+        cv2.destroyAllWindows()
+
+    def run(self):
+        """Публичный метод для запуска из другого кода."""
+        self.capture_and_display()
 
 
 def load_config(config_file="config.json"):
-    """Загрузка конфигурационного файла."""
     with open(config_file, 'r') as f:
         return json.load(f)
 
-
 def main():
-    config = load_config("config.json")
-
-    output_folder = config["output_folder"]  # Папка для вывода данных
-    os.makedirs(os.path.join(output_folder, 'images'), exist_ok=True)
-    os.makedirs(os.path.join(output_folder, 'labels'), exist_ok=True)
-
-    # Создаем экземпляр ScreenCapture
-    screen_capture = ScreenCapture(config, output_folder)
-    screen_capture.capture_and_display()
-
+    config = load_config()
+    out = config["output_folder"]
+    sc = ScreenCapture(config, out)
+    sc.run()
 
 if __name__ == '__main__':
     main()
