@@ -6,9 +6,9 @@ import json
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QListWidget, QTextBrowser, QFileDialog, QFormLayout, QDoubleSpinBox,
-    QSpinBox, QDialog, QGroupBox, QHBoxLayout, QCheckBox
+    QSpinBox, QDialog, QGroupBox, QHBoxLayout, QCheckBox, QSizePolicy, QSplitter
 )
-from PyQt5.QtCore import Qt, QThread, QTimer, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 
 from semiauto_dataset_collector import ScreenCapture
 from train import train_yolo
@@ -195,12 +195,21 @@ class YOLOApp(QWidget):
         btn_rem.clicked.connect(self.remove_class)
         layout.addWidget(btn_rem)
 
+        splitter = QSplitter(Qt.Vertical)
+
         self.class_list = QListWidget()
-        layout.addWidget(self.class_list)
+        self.class_list.setMinimumHeight(80)
+        self.class_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        splitter.addWidget(self.class_list)
         self.update_class_list()
 
         self.console = QTextBrowser()
-        layout.addWidget(self.console)
+        self.console.setMinimumHeight(100)
+        self.console.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        splitter.addWidget(self.console)
+
+        splitter.setSizes([200, 300])
+        layout.addWidget(splitter)
 
         btn_start = QPushButton("Start Data Collection")
         btn_start.clicked.connect(self.start_data_collection)
@@ -335,10 +344,10 @@ class YOLOApp(QWidget):
 
     def stop_training(self):
         if self.trainer_thread and self.trainer_thread.isRunning():
-            self.console.append("[INFO] Прерывание обучения...")
+            self.console.append("[INFO] Interrupting training...")
             self.trainer_thread.terminate()
             self.trainer_thread.wait()
-            self.console.append("[INFO] Обучение принудительно остановлено.")
+            self.console.append("[INFO] Training was forcefully stopped.")
         self.training_active = False
         self.btn_train_toggle.setText("Start Training")
 
@@ -374,9 +383,9 @@ class YOLOApp(QWidget):
 
     def training_finished(self, success):
         if success:
-            self.console.append("[INFO] ✅ Обучение завершено успешно.")
+            self.console.append("[INFO] ✅ Training completed successfully.")
         else:
-            self.console.append("[ERROR] ❌ Обучение завершилось с ошибкой.")
+            self.console.append("[ERROR] ❌ Training ended with an error.")
 
         self.btn_train_toggle.setText("Start Training")
         self.training_active = False

@@ -24,34 +24,34 @@ def train_yolo(
     name='auto',
     resume=False,
     log=print,
-    stop_callback=lambda: False  # 👈 новый параметр
+    stop_callback=lambda: False
 ):
     try:
         if device is None:
             device = 0 if torch.cuda.is_available() else 'cpu'
-            log(f"[INFO] Используется устройство: {device}")
+            log(f"[INFO] Using device: {device}")
 
         if not resume and not os.path.exists(model_path):
-            log(f"[ERROR] Файл модели не найден: {model_path}")
+            log(f"[ERROR] Model file not found: {model_path}")
             return 1
 
         if not os.path.exists(data_yaml):
-            log(f"[ERROR] Файл data.yaml не найден: {data_yaml}")
+            log(f"[ERROR] data.yaml file not found: {data_yaml}")
             return 1
 
-        log(f"[INFO] Модель: {model_path}")
+        log(f"[INFO] Model: {model_path}")
         log(f"[INFO] Data.yaml: {data_yaml}")
-        log(f"[INFO] Проект: {project}/{name}")
-        log(f"[INFO] Эпох: {epochs} | Размер: {imgsz} | Batch: {batch}")
-        log(f"[INFO] Режим: {'--resume' if resume else 'новое обучение'}")
+        log(f"[INFO] Project: {project}/{name}")
+        log(f"[INFO] Epochs: {epochs} | ImgSize: {imgsz} | Batch: {batch}")
+        log(f"[INFO] Mode: {'--resume' if resume else 'new training'}")
 
         if stop_callback():
-            log("[INFO] Обучение остановлено до начала.")
+            log("[INFO] Training was interrupted before start.")
             return 1
 
         model = YOLO(model_path if not resume else None)
 
-        log("[INFO] Запуск обучения...")
+        log("[INFO] Starting training...")
         model.train(
             data=data_yaml,
             epochs=epochs,
@@ -80,14 +80,14 @@ def train_yolo(
         )
 
         if stop_callback():
-            log("[INFO] Обучение остановлено вручную.")
+            log("[INFO] Training was manually interrupted.")
             return 1
 
-        log(f"[INFO] ✅ Обучение завершено. Модель: {project}/{name}/weights/best.pt")
+        log(f"[INFO] ✅ Training completed. Model saved at: {project}/{name}/weights/best.pt")
         return 0
 
     except Exception as e:
-        log(f"[ERROR] Исключение: {str(e)}")
+        log(f"[ERROR] Exception during training: {str(e)}")
         return 1
 
 
@@ -109,7 +109,7 @@ if __name__ == '__main__':
             cfg = load_config()
             args.data = cfg.get("last_data_yaml")
         if not args.data:
-            parser.error("--data обязательно")
+            parser.error("--data is required")
 
         return args
 

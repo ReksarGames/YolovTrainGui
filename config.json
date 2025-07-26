@@ -13,5 +13,5 @@
     "save_interval": 3,
     "detection_threshold": 0.5,
     "data_folder": "dataset_output",
-    "last_data_yaml": "datasets/Valorant/data.yaml"
+    "last_data_yaml": "E:/Project/PythonProjects/YolovTrainGui/datasets/Valorant/data - Copy.yaml"
 }

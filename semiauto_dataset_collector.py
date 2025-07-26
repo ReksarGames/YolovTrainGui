@@ -11,9 +11,9 @@ from screeninfo import get_monitors
 
 class ScreenCapture:
     """
-    Класс для захвата экрана, детекции и сохранения данных.
-    Всё «тяжёлое» работает внутри capture_and_display();
-    его можно запустить напрямую через метод run().
+    Class for screen capturing, detection, and data saving.
+    All heavy processing is done inside capture_and_display();
+    it can be launched directly using the run() method.
     """
     def __init__(self, config, output_folder, log_callback=print):
         self.config = config
@@ -23,7 +23,7 @@ class ScreenCapture:
         self.stop_flag = False
         self.last_detection_time = 0
 
-        # Загружаем модель в FP16 на CUDA
+        # Load the model in FP16 on CUDA
         self.model = YOLO(self.config["model_path"], verbose=False).to('cuda').half()
 
     def create_folders(self):
@@ -79,7 +79,7 @@ class ScreenCapture:
         return img
 
     def capture_and_display(self):
-        # Основной цикл: инициализация → захват → детекция → сохранение → отображение
+        # Main loop: initialization → capture → detection → saving → display
         self.capture_init()
         self.create_folders()
         logging.getLogger("ultralytics").setLevel(logging.ERROR)
@@ -107,7 +107,6 @@ class ScreenCapture:
         cv2.destroyAllWindows()
 
     def run(self):
-        """Публичный метод для запуска из другого кода."""
         self.capture_and_display()
 
 
