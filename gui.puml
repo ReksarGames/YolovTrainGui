@@ -27,6 +27,14 @@ rectangle "Main Window" {
         "Start Label GUI" : Start Label GUI
         "Back" : Back to Main Window
     }
+
+    rectangle "Train YOLO Button" {
+        "Data yaml" : Enter "Data yaml"
+        "Epochs" : Enter count of "Epochs"
+        "Imgsz" : enter "Imgsz" size, 640 or 480
+        "Batch" : enter "Batch"
+        "Name of Project" : Enter "Name of Project"
+    }
 }
 
 @enduml
