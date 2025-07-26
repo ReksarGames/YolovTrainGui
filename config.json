@@ -12,5 +12,7 @@
     "output_folder": "dataset_output",
     "save_interval": 3,
     "detection_threshold": 0.5,
-    "data_folder": "dataset_output"
+    "data_folder": "dataset_output",
+    "images_folder": "images",
+    "labels_folder": "labels"
 }
