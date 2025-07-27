@@ -1,9 +1,19 @@
 {
     "model_path": "models/sunxds_0.7.6.pt",
-    "classes": [
-        "class_player",
-        "class_head"
-    ],
+    "classes": ["class_player", "class_head"],
+    "class_map": {
+        "class_player": 0,
+        "class_bot": 99,
+        "class_weapon": 99,
+        "class_outline": 99,
+        "class_dead_body": 4,
+        "class_hideout_target_human": 99,
+        "class_hideout_target_balls": 99,
+        "class_head": 7,
+        "class_smoke": 99,
+        "class_fire": 99,
+        "class_third_person": 99
+    },
     "grabber": {
         "crop_size": 0.8,
         "width": 640,
