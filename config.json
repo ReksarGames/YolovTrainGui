@@ -1,18 +1,21 @@
 {
     "model_path": "models/sunxds_0.7.6.pt",
-    "classes": ["class_player", "class_head"],
+    "classes": [
+        "player",
+        "head"
+    ],
     "class_map": {
-        "class_player": 0,
-        "class_bot": 99,
-        "class_weapon": 99,
-        "class_outline": 99,
-        "class_dead_body": 4,
-        "class_hideout_target_human": 99,
-        "class_hideout_target_balls": 99,
-        "class_head": 7,
-        "class_smoke": 99,
-        "class_fire": 99,
-        "class_third_person": 99
+        "player": 0,
+        "bot": 99,
+        "weapon": 99,
+        "outline": 99,
+        "dead_body": 4,
+        "hideout_target_human": 99,
+        "hideout_target_balls": 99,
+        "head": 7,
+        "smoke": 99,
+        "fire": 99,
+        "third_person": 99
     },
     "grabber": {
         "crop_size": 0.8,
@@ -21,7 +24,7 @@
     },
     "output_folder": "dataset_output",
     "save_interval": 3,
-    "detection_threshold": 0.5,
+    "detection_threshold": 0.35,
     "data_folder": "dataset_output",
     "last_data_yaml": "E:/Project/PythonProjects/YolovTrainGui/datasets/Valorant/data - Copy.yaml"
 }

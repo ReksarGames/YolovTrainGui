@@ -3,12 +3,16 @@ import subprocess
 import sys
 import json
 
+import cv2
+import numpy as np
+from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QListWidget, QTextBrowser, QFileDialog, QFormLayout, QDoubleSpinBox,
     QSpinBox, QDialog, QGroupBox, QHBoxLayout, QCheckBox, QSizePolicy, QSplitter
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from ultralytics import YOLO
 
 from semiauto_dataset_collector import ScreenCapture
 from train import train_yolo
@@ -49,11 +53,18 @@ class TrainerThread(QThread):
     def stop(self):
         self._stop_flag = True  # если в будущем будет поддержка принудительной остановки
 
+from PyQt5.QtCore import pyqtSignal
 
 class CaptureThread(QThread):
+    frame_signal = pyqtSignal(np.ndarray)
+
     def __init__(self, capture_instance):
         super().__init__()
         self.capture_instance = capture_instance
+        self.capture_instance.on_frame_ready = self.emit_frame
+
+    def emit_frame(self, frame):
+        self.frame_signal.emit(frame)
 
     def run(self):
         self.capture_instance.capture_and_display()
@@ -69,6 +80,11 @@ class ConfigDialog(QDialog):
 
     def init_ui(self):
         layout = QFormLayout()
+
+        self.preview_label = QLabel()
+        self.preview_label.setFixedSize(640, 640)
+        self.preview_label.setStyleSheet("border: 1px solid #888; background-color: #111;")
+        layout.addWidget(self.preview_label)
 
         self.model_path_input = QLineEdit(self.config.get("model_path", ""))
         layout.addRow("Model Path:", self.model_path_input)
@@ -223,6 +239,10 @@ class YOLOApp(QWidget):
         btn_split.clicked.connect(self.split_dataset)
         layout.addWidget(btn_split)
 
+        btn_show_classes = QPushButton("Show Classes from Model")
+        btn_show_classes.clicked.connect(self.show_model_classes)
+        layout.addWidget(btn_show_classes)
+
         grp = QGroupBox("Train YOLO Parameters")
         form = QFormLayout()
         data_layout = QHBoxLayout()
@@ -265,6 +285,32 @@ class YOLOApp(QWidget):
         layout.addWidget(btn_def)
 
         self.setLayout(layout)
+
+    def show_model_classes(self):
+        model_path = self.config.get("model_path", "")
+        if not os.path.isfile(model_path):
+            self.console.append(f"[ERROR] Model not found at path: {model_path}")
+            return
+
+        try:
+            model = YOLO(model_path)
+            names = model.names
+            self.console.append("[INFO] Model classes:")
+            for i, name in names.items():
+                self.console.append(f"  {i}: {name}")
+        except Exception as e:
+            self.console.append(f"[ERROR] Failed to load model: {e}")
+
+    def display_frame(self, frame):
+        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_image.shape
+        bytes_per_line = ch * w
+        qimg = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.preview_label.width(), self.preview_label.height(),
+            Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        self.preview_label.setPixmap(pix)
 
     def toggle_training(self):
         if not self.training_active:
@@ -311,14 +357,41 @@ class YOLOApp(QWidget):
         self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
 
     def start_data_collection(self):
-        if self.capture is None:
-            self.capture = ScreenCapture(
-                config=self.config,
-                output_folder=self.config["output_folder"],
-                log_callback = self.log_to_console
-            )
+        if not self.config.get("classes"):
+            self.console.append("[ERROR] No classes selected for collection.")
+            return
+
+        # Загружаем модель YOLO
+        model = YOLO(self.config["model_path"], verbose=False)
+        model_names = model.names  # {0: 'class_player', 1: 'class_head', ...}
+        self.console.append(f"[DEBUG] model.names: {model_names}")
+
+        # Создаём reverse-словарь { 'class_player': 0, ... }
+        reverse_names = {v: k for k, v in model_names.items()}
+
+        # Строим class_map для всех классов из config["classes"]
+        class_map = {}
+        for class_name in self.config["classes"]:
+            if class_name in reverse_names:
+                class_map[class_name] = reverse_names[class_name]
+            else:
+                self.console.append(f"[WARNING] Class '{class_name}' not found in model.names.")
+                class_map[class_name] = 99  # 99 = игнорируемый класс
+
+        self.config["class_map"] = class_map
+        self.console.append(f"[INFO] Class map: {class_map}")
+        self.console.append(f"[INFO] Detection threshold: {self.config.get('detection_threshold')}")
+
+        # Пересоздаём ScreenCapture каждый раз с актуальным конфигом
+        self.capture = ScreenCapture(
+            config=self.config,
+            output_folder=self.config["output_folder"],
+            log_callback=self.log_to_console
+        )
+
         self.console.append("Starting data collection…")
         self.capture_thread = CaptureThread(self.capture)
+        self.capture_thread.frame_signal.connect(self.display_frame)
         self.capture_thread.start()
 
     def stop_data_collection(self):
@@ -400,17 +473,36 @@ class YOLOApp(QWidget):
         default = {
             "model_path": "models/sunxds_0.7.6.pt",
             "classes": ["class_player", "class_head"],
-            "grabber": {"crop_size": 0.8, "width": 640, "height": 640},
+            "class_map": {
+                "class_player": 0,
+                "class_bot": 99,
+                "class_weapon": 99,
+                "class_outline": 99,
+                "class_dead_body": 99,
+                "class_hideout_target_human": 99,
+                "class_hideout_target_balls": 99,
+                "class_head": 7,
+                "class_smoke": 99,
+                "class_fire": 99,
+                "class_third_person": 99
+            },
+            "grabber": {
+                "crop_size": 0.8,
+                "width": 640,
+                "height": 640
+            },
             "output_folder": "dataset_output",
             "save_interval": 3,
-            "detection_threshold": 0.5,
-            "data_folder": "dataset_output"
+            "detection_threshold": 0.35,
+            "data_folder": "dataset_output",
+            "last_data_yaml": "E:/Project/PythonProjects/YolovTrainGui/datasets/Valorant/data - Copy.yaml"
         }
         self.config = default
         self.save_config()
         self.update_class_list()
         self.console.append("Configuration restored to default.")
         self.data_yaml_input.setText("datasets/Valorant/data.yaml")
+
 
 def apply_dark_theme(app):
     app.setStyleSheet("""
