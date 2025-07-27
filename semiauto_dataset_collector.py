@@ -64,6 +64,7 @@ class ScreenCapture:
             conf = float(box.conf)
 
             if cls not in self.allowed_class_ids:
+                self.log(f"[DEBUG] Class ID {cls} skipped")
                 continue
             if conf < self.config.get("detection_threshold", 0.5):
                 continue
@@ -117,9 +118,9 @@ class ScreenCapture:
 
                 annotated = self.draw_boxes(frame, results)
                 cv2.imshow("Detection Result", annotated)
-                self.log(f"[INFO] Detections: {len(results[0].boxes)}")
+                # self.log(f"[INFO] Detections: {len(results[0].boxes)}")
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if cv2.waitKey(1) & 0xFF == ord('p'):
                 self.stop_flag = True
 
             time.sleep(0.01)
