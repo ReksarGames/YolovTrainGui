@@ -1,0 +1,24 @@
+{
+  "video_sources": [
+    "https://www.twitch.tv/videos/2522936875",
+    "https://www.twitch.tv/videos/2524662899"
+  ],
+  "raw_stream_folder": "stream/raw_streams",
+  "chunks_folder": "stream/chunks",
+  "output_folder": "stream/dataset",
+  "time_interval": 8,
+  "detection_threshold": 0.3,
+  "model_path": "models/sunxds_0.7.6.pt",
+  "class_map": {
+    "player": 0,
+    "head": 7
+  },
+  "num_streams": 6,
+  "split_workers": 4,
+  "max_download_workers": 2,
+  "process_workers": 16,
+  "save_workers": 4,
+
+  "download_archive": "stream/downloaded.txt",
+  "resume_info_file": "stream/resume.json"
+}

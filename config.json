@@ -2,20 +2,12 @@
     "model_path": "models/sunxds_0.7.6.pt",
     "classes": [
         "player",
-        "head"
+        "head",
+        "dead_body"
     ],
     "class_map": {
         "player": 0,
-        "bot": 99,
-        "weapon": 99,
-        "outline": 99,
-        "dead_body": 4,
-        "hideout_target_human": 99,
-        "hideout_target_balls": 99,
-        "head": 7,
-        "smoke": 99,
-        "fire": 99,
-        "third_person": 99
+        "head": 7
     },
     "grabber": {
         "crop_size": 0.8,
@@ -24,7 +16,7 @@
     },
     "output_folder": "dataset_output",
     "save_interval": 3,
-    "detection_threshold": 0.35,
+    "detection_threshold": 0.4,
     "data_folder": "dataset_output",
     "last_data_yaml": "E:/Project/PythonProjects/YolovTrainGui/datasets/Valorant/data - Copy.yaml"
 }

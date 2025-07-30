@@ -6,3 +6,5 @@ runs/
 .venv/
 __pycache__/
 /models/
+/utils/ffmpeg/
+/stream/

@@ -8,6 +8,8 @@
 
 **YOLO Flow Studio** is a desktop application with a graphical interface (PyQt5) that handles the complete workflow of YOLO dataset management:
 
+[📹 StreamCut — automated tool for downloading, splitting, and processing Twitch VOD](https://github.com/ReksarGames/StreamCut)
+
 ![GUI](docs/images/gui.png)
 
 - 🤖 Semi-automatic **screen dataset collection** using a pretrained YOLO model.
@@ -145,3 +147,101 @@ YOLO-Flow-Studio
 ├── config.json             # Configuration file
 ├── LICENSE                 # MIT License
 └── gui.puml                # (optional)
+
+```
+
+---
+
+# 🚀 StreamCut
+
+Automated tool for downloading, slicing and processing Twitch VODs 🎥 using YOLO 🤖.  
+It downloads VODs, splits them into time‑based segments, runs inference on selected frames, and saves only those frames containing your target classes—perfect for building training datasets!
+
+---
+
+## 📋 Overview
+
+1. 📥 **Download**  
+   Parallel VOD download via `yt-dlp`, with archive tracking to avoid duplicates.  
+2. 🎞️ **Slice**  
+   Split each video into `.ts` segments of fixed duration using `ffmpeg`.  
+3. 🤖 **Infer**  
+   Run YOLO on every Nth frame, save images & labels only when detections occur.  
+4. ⚙️ **Parallelism**  
+   Fully configurable worker pools for each stage: download, slice, inference, save.
+
+---
+
+## ✨ Key Features
+
+- **Bulk VOD support** — download any number of Twitch VOD URLs.  
+- **Selective frame extraction** — keeps only frames with non‑zero detections.  
+- **Customizable parallelism** — control workers for each pipeline stage.  
+- **Download archive** — maintains `downloaded.txt` to skip already‑fetched videos.  
+- **Resumable processing** — optional `resume.json` to pick up where you left off.  
+- **Ready‑to‑use dataset**  
+  - `stream/dataset/images/*.jpg`  
+  - `stream/dataset/labels/*.txt`  
+
+---
+
+## ⚙️ Configuration (`config.json`)
+
+```jsonc
+{
+  "video_sources": [
+    "https://www.twitch.tv/videos/2522936875",
+    "https://www.twitch.tv/videos/2524662899"
+  ],
+  "raw_stream_folder":  "stream/raw_streams",    // Downloaded VODs
+  "chunks_folder":      "stream/chunks",         // .ts segments
+  "output_folder":      "stream/dataset",        // images/ & labels/
+  "time_interval":      3,                       // Inference every N frames
+  "detection_threshold": 0.3,                    // YOLO confidence threshold
+  "model_path":         "models/sunxds_0.7.6.pt",// Path to your .pt model
+  "class_map": {
+    "player": 0,
+    "head":   7
+  },
+
+  // 👷 Worker pools
+  "max_download_workers": 2,   // 🛠 Parallel downloads (yt-dlp)
+  "split_workers":        4,   // 🪓 ffmpeg slicing
+  "process_workers":      6,   // 🔍 YOLO inference
+  "save_workers":         2,   // 💾 Disk writes (images + labels)
+
+  "download_archive":  "stream/downloaded.txt", // Tracks downloaded URLs
+  "resume_info_file":  "stream/resume.json"     // Tracks processed segments
+}
+
+```
+
+| Parameter              | Emoji | Description                                                | Recommended                           |
+| ---------------------- | :---: | ---------------------------------------------------------- | ------------------------------------- |
+| `max_download_workers` |   🛠  | Number of parallel `yt-dlp` download threads               | 2–4 (avoid saturating your network)   |
+| `split_workers`        |   🪓  | Threads for slicing `.ts` files into fixed‑length segments | \~CPU cores                           |
+| `process_workers`      |   🔍  | Concurrent YOLO inference processes (one per chunk)        | Based on GPU capacity                 |
+| `save_workers`         |   💾  | Threads dedicated to saving images & label files to disk   | 1–2 (prevents I/O blocking inference) |
+
+```
+📂 Directory Structure
+
+├── StreamCut.py
+├── config.json
+├── models/
+│   └── sunxds_0.7.6.pt
+└── stream/
+    ├── raw_streams/      # Downloaded VODs
+    ├── chunks/           # .ts segments
+    ├── downloaded.txt    # Archive of fetched URLs
+    ├── resume.json       # (Optional) resume state
+    └── dataset/
+        ├── images/       # Saved frames (.jpg)
+        └── labels/       # YOLO labels (.txt)
+
+```
+
+📝 Notes
++ time_interval is in frames for inference. If you want “every 10 seconds”, compute interval_frames = fps * 10.
++ resume.json is created automatically on first run—no manual steps needed.
++ Adjust worker counts based on your hardware (CPU cores for slicing, GPU for inference, disk I/O for saving).
