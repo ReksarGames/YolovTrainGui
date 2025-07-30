@@ -93,13 +93,6 @@ class StreamCut:
             exe.map(split_file, files)
 
     def process_all(self):
-        """
-        Проходим по чанкам, делаем инференс и сохраняем кадры,
-        при этом сохраняем прогресс, чтобы не обрабатывать один и тот же чанк дважды.
-        """
-        from queue import Queue
-        import threading
-
         # Убедимся, что папка для resume_info_file существует
         os.makedirs(os.path.dirname(self.resume_info_file), exist_ok=True)
 
@@ -113,7 +106,7 @@ class StreamCut:
         resume_lock = threading.Lock()
         save_queue = Queue()
 
-        # === Сэйвер: вынимает из очереди и пишет на диск ===
+        # Сэйвер: вынимает из очереди и пишет на диск
         def saver():
             while True:
                 item = save_queue.get()
@@ -133,7 +126,7 @@ class StreamCut:
             t.start()
             savers.append(t)
 
-        # === Основная функция обработки одного чанка ===
+        # Обработка одного чанка
         def process_chunk(ts_path: Path):
             base = ts_path.stem
 
@@ -151,20 +144,34 @@ class StreamCut:
                 if not ret:
                     break
 
+                # Центровая обрезка до 640×640 (иначе ресайз)
+                crop_size = 640
+                h0, w0 = frame.shape[:2]
+                if h0 >= crop_size and w0 >= crop_size:
+                    x1 = (w0 - crop_size) // 2
+                    y1 = (h0 - crop_size) // 2
+                    frame_crop = frame[y1 : y1 + crop_size, x1 : x1 + crop_size]
+                else:
+                    frame_crop = cv2.resize(frame, (crop_size, crop_size))
+
                 if frame_idx % self.time_interval == 0:
-                    results = self.model(frame, imgsz=(640, 640), conf=self.detection_threshold)
-                    h, w = frame.shape[:2]
+                    results = self.model(
+                        frame_crop,
+                        imgsz=(crop_size, crop_size),
+                        conf=self.detection_threshold
+                    )
                     lines = []
+                    w, h = crop_size, crop_size
 
                     for r in results:
                         for box, cls in zip(r.boxes.xyxy, r.boxes.cls):
                             cls_id = int(cls)
                             if cls_id in self.class_map.values():
-                                x1, y1, x2, y2 = box
-                                cx = ((x1 + x2) / 2) / w
-                                cy = ((y1 + y2) / 2) / h
-                                bw = (x2 - x1) / w
-                                bh = (y2 - y1) / h
+                                x1b, y1b, x2b, y2b = box
+                                cx = ((x1b + x2b) / 2) / w
+                                cy = ((y1b + y2b) / 2) / h
+                                bw = (x2b - x1b) / w
+                                bh = (y2b - y1b) / h
                                 lines.append(f"{cls_id} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
 
                     if lines:
@@ -172,8 +179,7 @@ class StreamCut:
                         lbl_name = f"{base}_{frame_idx:05d}.txt"
                         img_path = os.path.join(self.images_folder, img_name)
                         lbl_path = os.path.join(self.labels_folder, lbl_name)
-                        # Кидаем в очередь на сохранение
-                        save_queue.put((frame.copy(), img_path, lbl_path, lines, img_name))
+                        save_queue.put((frame_crop.copy(), img_path, lbl_path, lines, img_name))
                     else:
                         self.log(f"[WARNING] No valid detections → skipping {base}_{frame_idx:05d}.jpg")
 
@@ -181,18 +187,18 @@ class StreamCut:
 
             cap.release()
 
-            # После полного обхода чанка — отмечаем его как «обработанный»
+            # Отмечаем чанк как обработанный
             with resume_lock:
                 resume["processed_chunks"].append(base)
                 with open(self.resume_info_file, 'w') as f:
                     json.dump(resume, f)
 
-        # Запускаем обработку чанков параллельно
+        # Параллельный запуск инференса по всем чанкам
         chunks = list(Path(self.chunks_folder).glob("*.ts"))
         with ThreadPoolExecutor(max_workers=self.process_workers) as exe:
             exe.map(process_chunk, chunks)
 
-        # Дожидаемся завершения всех сохранений и «выключаем» сэйвер-воркеры
+        # Ждём завершения всех сохранений и “выключаем” сэйвер-воркеры
         save_queue.join()
         for _ in savers:
             save_queue.put(None)
