@@ -4,21 +4,31 @@
     "https://www.twitch.tv/videos/2524662899"
   ],
   "raw_stream_folder": "stream/raw_streams",
+  "processed_stream_folder": "stream/cropped_streams",
   "chunks_folder": "stream/chunks",
   "output_folder": "stream/dataset",
-  "time_interval": 8,
+  "grabber": {
+    "width": 640,
+    "height": 640
+  },
+  "time_interval": 10,
   "detection_threshold": 0.3,
   "model_path": "models/sunxds_0.7.6.pt",
+  "classes": ["player", "head"],
   "class_map": {
     "player": 0,
     "head": 7
   },
   "num_streams": 6,
+  "chunks_per_stream": 10,
   "split_workers": 4,
   "max_download_workers": 2,
   "process_workers": 16,
   "save_workers": 4,
 
+
   "download_archive": "stream/downloaded.txt",
-  "resume_info_file": "stream/resume.json"
+  "resume_info_file": "stream/resume.json",
+  "ffmpeg_path": "utils/ffmpeg/bin/ffmpeg.exe"
+
 }

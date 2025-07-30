@@ -75,42 +75,71 @@ class StreamCut:
     def split_all(self):
         """
         Разбиваем скачанные видео на .ts-чанки.
-        Каждый файл режется на chunks_per_stream сегментов по time_interval секунд.
+        Каждый файл режется на self.chunks_per_stream равных сегментов,
+        покрывающих всю его длину. Если уже есть хотя бы self.chunks_per_stream
+        чанков для данного видео, нарезка пропускается.
         """
-        # Если уже есть .ts-файлы — пропускаем
-        existing = list(Path(self.chunks_folder).glob("*.ts"))
-        if existing:
-            self.log(f"[SPLIT] Найдено {len(existing)} чанков, пропускаем split_all")
+        os.makedirs(self.chunks_folder, exist_ok=True)
+        files = list(Path(self.raw_stream_folder).glob("*.*"))
+        if not files:
+            self.log(f"[SPLIT] ⚠ Нет исходных видео в {self.raw_stream_folder}")
             return
 
-        ffmpeg_path = self.ffmpeg_path  # <-- здесь мы читаем путь к ffmpeg из конфига
-
-        total_duration = self.time_interval * self.chunks_per_stream
-        self.log(f"[SPLIT] Режу каждый файл на "
-                 f"{self.chunks_per_stream}×{self.time_interval}s (max {total_duration}s)…")
+        self.log(f"[SPLIT] Режу {len(files)} файлов на {self.chunks_per_stream} частей…")
 
         def split_file(path: Path):
             base = path.stem
+
+            # проверяем, сколько уже есть чанков
+            existing = list(Path(self.chunks_folder).glob(f"{base}_*.ts"))
+            if len(existing) >= self.chunks_per_stream:
+                self.log(f"[SPLIT] {base} — найдено {len(existing)}/{self.chunks_per_stream} чанков, пропускаем")
+                return
+
+            try:
+                duration = self._get_duration(path)
+            except Exception as e:
+                self.log(f"[ERROR] Не удалось узнать длительность {base}: {e}")
+                return
+
+            seg_time = duration / self.chunks_per_stream
             out_pattern = os.path.join(self.chunks_folder, f"{base}_%03d.ts")
             cmd = [
                 self.ffmpeg_path, "-y",
-                "-hide_banner",  # скрыть шапку
-                "-loglevel", "error",  # только ошибки
+                "-hide_banner", "-loglevel", "error",
                 "-i", str(path),
-                "-t", str(total_duration),
                 "-c", "copy", "-map", "0",
                 "-f", "segment",
-                "-segment_time", str(self.time_interval),
+                "-segment_time", str(seg_time),
                 "-segment_format", "mpegts",
                 out_pattern
             ]
-            subprocess.run(cmd, check=True)
-            self.log(f"[SPLIT] {base} → {self.chunks_per_stream} чанков")
+            try:
+                subprocess.run(cmd, check=True)
+                self.log(f"[SPLIT] {base} → {self.chunks_per_stream}×{seg_time:.1f}s")
+            except subprocess.CalledProcessError as e:
+                self.log(f"[ERROR] FFmpeg нарезка {base} упала: {e}")
 
-        # Поддерживаем все форматы исходников (*.mp4, *.mkv, *.ts…)
-        files = list(Path(self.raw_stream_folder).glob("*.*"))
         with ThreadPoolExecutor(max_workers=self.split_workers) as ex:
             ex.map(split_file, files)
+
+
+    def _get_duration(self, path: Path) -> float:
+        """Возвращает длительность видео в секундах через ffprobe."""
+        # Берём папку от ffmpeg и меняем имя на ffprobe.exe
+        ffmpeg = Path(self.ffmpeg_path)
+        ffprobe = ffmpeg.with_name("ffprobe.exe")
+
+        cmd = [
+            str(ffprobe),
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path)
+        ]
+        res = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        return float(res.stdout)
 
     def process_all(self):
         """
