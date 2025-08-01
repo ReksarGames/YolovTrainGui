@@ -9,6 +9,11 @@ from pathlib import Path
 from ultralytics import YOLO
 import logging
 
+
+#TODO: Сделать классовую метку. ПРимер Оригинальная модель имеет 7 классов, а мы захватываем только 0, 4, 7. В итоге, классовые метки в выводе будет 0, 1, 2. Взять пример из semi
+
+#TODO: Сдлеать отдельный скрипт который исправит метки в лейблах. сейчас там 0, 4, 7. А модель рассчитана на 0 , 1 , 2
+
 # Показывать в консоли только warning+ от Ultralytics
 logging.getLogger('ultralytics').setLevel(logging.WARNING)
 
@@ -23,9 +28,8 @@ class StreamCut:
         self.chunks_folder       = cfg["chunks_folder"]
         self.output_folder       = cfg["output_folder"]
 
-        os.makedirs(self.raw_stream_folder, exist_ok=True)
-        os.makedirs(self.chunks_folder, exist_ok=True)
-        os.makedirs(self.output_folder, exist_ok=True)
+        for p in (self.raw_stream_folder, self.chunks_folder, self.output_folder):
+            os.makedirs(p, exist_ok=True)
 
         self.images_folder = os.path.join(self.output_folder, "images")
         self.labels_folder = os.path.join(self.output_folder, "labels")
@@ -34,8 +38,8 @@ class StreamCut:
 
         # ——— Параметры ———
         self.video_sources       = cfg["video_sources"]
-        self.time_interval       = cfg["time_interval"]        # seconds per segment
-        self.chunks_per_stream   = cfg["chunks_per_stream"]    # how many segments per video
+        self.chunks_per_stream   = cfg["chunks_per_stream"]
+        self.time_interval       = cfg["time_interval"]
         self.detection_threshold = cfg["detection_threshold"]
         self.model_path          = cfg["model_path"]
         self.class_map           = cfg["class_map"]
@@ -49,7 +53,7 @@ class StreamCut:
         # ——— Архив скачанных и резюме ———
         self.download_archive = cfg["download_archive"]
         self.resume_info_file = cfg["resume_info_file"]
-        self.ffmpeg_path = cfg["ffmpeg_path"]
+        self.ffmpeg_path      = cfg["ffmpeg_path"]
 
         # ——— Модель ———
         self.model = YOLO(self.model_path)
@@ -72,12 +76,26 @@ class StreamCut:
         with ThreadPoolExecutor(max_workers=self.max_download_workers) as ex:
             ex.map(dl, self.video_sources)
 
+    def _get_duration(self, path: Path) -> float:
+        """Возвращает длительность видео в секундах через ffprobe.exe."""
+        ffmpeg = Path(self.ffmpeg_path)
+        ffprobe = ffmpeg.with_name("ffprobe.exe")
+        cmd = [
+            str(ffprobe),
+            "-v", "error",
+            "-select_streams", "v:0",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            str(path)
+        ]
+        res = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        return float(res.stdout)
+
     def split_all(self):
         """
         Разбиваем скачанные видео на .ts-чанки.
         Каждый файл режется на self.chunks_per_stream равных сегментов,
-        покрывающих всю его длину. Если уже есть хотя бы self.chunks_per_stream
-        чанков для данного видео, нарезка пропускается.
+        покрывающих всю его длину. Если уже нарезано достаточно чанков — пропускаем.
         """
         os.makedirs(self.chunks_folder, exist_ok=True)
         files = list(Path(self.raw_stream_folder).glob("*.*"))
@@ -89,8 +107,6 @@ class StreamCut:
 
         def split_file(path: Path):
             base = path.stem
-
-            # проверяем, сколько уже есть чанков
             existing = list(Path(self.chunks_folder).glob(f"{base}_*.ts"))
             if len(existing) >= self.chunks_per_stream:
                 self.log(f"[SPLIT] {base} — найдено {len(existing)}/{self.chunks_per_stream} чанков, пропускаем")
@@ -123,30 +139,11 @@ class StreamCut:
         with ThreadPoolExecutor(max_workers=self.split_workers) as ex:
             ex.map(split_file, files)
 
-
-    def _get_duration(self, path: Path) -> float:
-        """Возвращает длительность видео в секундах через ffprobe."""
-        # Берём папку от ffmpeg и меняем имя на ffprobe.exe
-        ffmpeg = Path(self.ffmpeg_path)
-        ffprobe = ffmpeg.with_name("ffprobe.exe")
-
-        cmd = [
-            str(ffprobe),
-            "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
-            str(path)
-        ]
-        res = subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-        return float(res.stdout)
-
     def process_all(self):
         """
         Обходим .ts-чанки, делаем инференс и сохраняем кадры,
-        с прогрессом в resume_info_file, и центрированным 640×640 crop.
+        с прогрессом в resume_info_file, центрированный 640×640 crop.
         """
-        # — Подготовка resume-файла —
         os.makedirs(os.path.dirname(self.resume_info_file), exist_ok=True)
         if os.path.exists(self.resume_info_file):
             with open(self.resume_info_file, 'r') as f:
@@ -160,11 +157,11 @@ class StreamCut:
         resume_lock = threading.Lock()
         save_q = Queue()
 
-        # — Сэйверы кадров и лейблов —
         def saver():
             while True:
                 itm = save_q.get()
-                if itm is None: break
+                if itm is None:
+                    break
                 frame, img_p, lbl_p, lines, name = itm
                 cv2.imwrite(img_p, frame)
                 with open(lbl_p, 'w') as fw:
@@ -178,7 +175,6 @@ class StreamCut:
             t.start()
             savers.append(t)
 
-        # — Загружаем / создаём чанки —
         chunks = list(Path(self.chunks_folder).glob("*.ts"))
         if not chunks:
             self.log(f"[WARNING] Чанков нет → вызываю split_all()")
@@ -187,7 +183,6 @@ class StreamCut:
             if not chunks:
                 raise RuntimeError("Не удалось создать .ts-чанки!")
 
-        # — Функция обработки одного .ts —
         def proc_chunk(ts_path: Path):
             base = ts_path.stem
             with resume_lock:
@@ -199,7 +194,8 @@ class StreamCut:
             idx = 0
             while True:
                 ret, frame = cap.read()
-                if not ret: break
+                if not ret:
+                    break
 
                 # Центрированный crop 640×640
                 h, w = frame.shape[:2]
@@ -213,7 +209,7 @@ class StreamCut:
                         for box, cls in zip(r.boxes.xyxy, r.boxes.cls):
                             cid = int(cls)
                             if cid in self.class_map.values():
-                                x1,y1,x2,y2 = box
+                                x1, y1, x2, y2 = box
                                 cx = ((x1+x2)/2)/640
                                 cy = ((y1+y2)/2)/640
                                 bw = (x2-x1)/640
@@ -239,12 +235,14 @@ class StreamCut:
             ex.map(proc_chunk, chunks)
 
         save_q.join()
-        for _ in savers: save_q.put(None)
-        for t in savers: t.join()
+        for _ in savers:
+            save_q.put(None)
+        for t in savers:
+            t.join()
 
     def run(self):
         self.download_all()
-        self.split_all()    # ← тут режем стримы на чанки
+        self.split_all()
         self.process_all()
         self.log("[DONE]")
 

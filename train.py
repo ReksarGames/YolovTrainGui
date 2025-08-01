@@ -14,9 +14,9 @@ def load_config(path='config.json'):
 
 
 def train_yolo(
-    model_path='models/yolov12s.pt',
+    model_path='models/yolov12n.pt',
     data_yaml='datasets/Valorant/data.yaml',
-    epochs=100,
+    epochs=50,
     imgsz=640,
     batch=16,
     device=None,
