@@ -1,5 +1,4 @@
 import os
-import subprocess
 import sys
 import json
 
@@ -13,11 +12,10 @@ from PyQt5.QtWidgets import (
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from ultralytics import YOLO
-
 from semiauto_dataset_collector import ScreenCapture
 from train import train_yolo
 
-
+# -------------------- Training Thread --------------------
 class TrainerThread(QThread):
     log_signal = pyqtSignal(str)
     finished = pyqtSignal(bool)
@@ -53,10 +51,10 @@ class TrainerThread(QThread):
             self.finished.emit(False)
 
     def stop(self):
-        self._stop_flag = True  # если в будущем будет поддержка принудительной остановки
+        self._stop_flag = True
 
-from PyQt5.QtCore import pyqtSignal
 
+# -------------------- Capture Thread --------------------
 class CaptureThread(QThread):
     frame_signal = pyqtSignal(np.ndarray)
 
@@ -71,7 +69,7 @@ class CaptureThread(QThread):
     def run(self):
         self.capture_instance.capture_and_display()
 
-
+# -------------------- Config Dialog --------------------
 class ConfigDialog(QDialog):
     def __init__(self, config):
         super().__init__()
@@ -83,17 +81,20 @@ class ConfigDialog(QDialog):
     def init_ui(self):
         layout = QFormLayout()
 
+        # preview (можно использовать для отображения frame)
         self.preview_label = QLabel()
         self.preview_label.setFixedSize(640, 640)
         self.preview_label.setStyleSheet("border: 1px solid #888; background-color: #111;")
         layout.addWidget(self.preview_label)
 
+        # model path
         self.model_path_input = QLineEdit(self.config.get("model_path", ""))
         layout.addRow("Model Path:", self.model_path_input)
         btn_model = QPushButton("Browse Model…")
         btn_model.clicked.connect(self.browse_model_path)
         layout.addWidget(btn_model)
 
+        # grabber settings
         self.crop_size_input = QDoubleSpinBox()
         self.crop_size_input.setSingleStep(0.01)
         self.crop_size_input.setRange(0.0, 1.0)
@@ -112,26 +113,31 @@ class ConfigDialog(QDialog):
         self.height_input.setValue(self.config.get("grabber", {}).get("height", 640))
         layout.addRow("Height:", self.height_input)
 
+        # output folder
         self.output_folder_input = QLineEdit(self.config.get("output_folder", ""))
         layout.addRow("Output Folder:", self.output_folder_input)
         btn_out = QPushButton("Browse Output…")
         btn_out.clicked.connect(self.browse_output_folder)
         layout.addWidget(btn_out)
 
+        # save interval
         self.save_interval_input = QSpinBox()
         self.save_interval_input.setValue(self.config.get("save_interval", 3))
         layout.addRow("Save Interval:", self.save_interval_input)
 
+        # detection threshold
         self.detection_threshold_input = QDoubleSpinBox()
         self.detection_threshold_input.setValue(self.config.get("detection_threshold", 0.5))
         layout.addRow("Detection Threshold:", self.detection_threshold_input)
 
+        # data folder
         self.data_folder_input = QLineEdit(self.config.get("data_folder", ""))
         layout.addRow("Data Folder:", self.data_folder_input)
         btn_data = QPushButton("Browse Data…")
         btn_data.clicked.connect(self.browse_data_folder)
         layout.addWidget(btn_data)
 
+        # save button
         btn_save = QPushButton("Save")
         btn_save.clicked.connect(self.save_config)
         layout.addWidget(btn_save)
@@ -172,7 +178,7 @@ class ConfigDialog(QDialog):
         except Exception as e:
             print(f"Error saving config: {e}")
 
-
+# -------------------- Main App --------------------
 class YOLOApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -180,6 +186,7 @@ class YOLOApp(QWidget):
         self.setWindowTitle('YOLO Dataset Manager')
         self.setGeometry(100, 100, 800, 500)
 
+        # state
         self.config = self.load_config("config.json")
         self.capture = None
         self.capture_thread = None
@@ -189,6 +196,7 @@ class YOLOApp(QWidget):
 
         self.init_ui()
 
+    # -------- Config I/O ----------
     def load_config(self, path):
         try:
             with open(path, 'r') as f:
@@ -204,9 +212,11 @@ class YOLOApp(QWidget):
         except Exception as e:
             self.console.append(f"Error saving configuration: {e}")
 
+    # -------- UI ----------
     def init_ui(self):
         layout = QVBoxLayout()
 
+        # classes controls
         layout.addWidget(QLabel("Select classes:"))
         self.class_input = QLineEdit()
         self.class_input.setPlaceholderText("Enter class name")
@@ -236,10 +246,12 @@ class YOLOApp(QWidget):
         splitter.setSizes([200, 300])
         layout.addWidget(splitter)
 
+        # data collection toggle
         self.btn_data_toggle = QPushButton("Start Data Collection")
         self.btn_data_toggle.clicked.connect(self.toggle_data_collection)
         layout.addWidget(self.btn_data_toggle)
 
+        # misc buttons
         btn_split = QPushButton("Split Dataset")
         btn_split.clicked.connect(self.split_dataset)
         layout.addWidget(btn_split)
@@ -248,6 +260,7 @@ class YOLOApp(QWidget):
         btn_show_classes.clicked.connect(self.show_model_classes)
         layout.addWidget(btn_show_classes)
 
+        # training params
         grp = QGroupBox("Train YOLO Parameters")
         form = QFormLayout()
         data_layout = QHBoxLayout()
@@ -299,10 +312,12 @@ class YOLOApp(QWidget):
         grp.setLayout(form)
         layout.addWidget(grp)
 
+        # training toggle
         self.btn_train_toggle = QPushButton("Start Training")
         self.btn_train_toggle.clicked.connect(self.toggle_training)
         layout.addWidget(self.btn_train_toggle)
 
+        # config management
         btn_cfg = QPushButton("Config Settings")
         btn_cfg.clicked.connect(self.open_config_dialog)
         layout.addWidget(btn_cfg)
@@ -311,7 +326,7 @@ class YOLOApp(QWidget):
         self.btn_def.clicked.connect(self.restore_default_config)
         layout.addWidget(self.btn_def)
 
-        # сохраняем при любом изменении
+        # connect autosave
         self.data_yaml_input.editingFinished.connect(self.persist_train_params)
         self.epochs_input.valueChanged.connect(lambda _: self.persist_train_params())
         self.imgsz_input.valueChanged.connect(lambda _: self.persist_train_params())
@@ -323,75 +338,17 @@ class YOLOApp(QWidget):
 
         self.setLayout(layout)
 
-    def show_model_classes(self):
-        model_path = self.config.get("model_path", "")
-        if not os.path.isfile(model_path):
-            self.console.append(f"[ERROR] Model not found at path: {model_path}")
-            return
-
-        try:
-            model = YOLO(model_path)
-            names = model.names
-            self.console.append("[INFO] Model classes:")
-            for i, name in names.items():
-                self.console.append(f"  {i}: {name}")
-        except Exception as e:
-            self.console.append(f"[ERROR] Failed to load model: {e}")
-
-    def persist_train_params(self):
-        # актуализируем last_data_yaml тоже
-        self.config["last_data_yaml"] = self.data_yaml_input.text().strip()
-        self.config["train_defaults"] = {
-            "epochs": int(self.epochs_input.value()),
-            "imgsz": int(self.imgsz_input.value()),
-            "batch": int(self.batch_input.value()),
-            "project_name": self.project_name_input.text().strip(),
-            "resume": bool(self.continue_checkbox.isChecked()),
-            "exist_ok": bool(self.exist_ok_checkbox.isChecked()),
-            "save_period": int(self.save_period_input.value())
-        }
-        self.save_config()
-
-    def display_frame(self, frame):
-        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = rgb_image.shape
-        bytes_per_line = ch * w
-        qimg = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pix = QPixmap.fromImage(qimg).scaled(
-            self.preview_label.width(), self.preview_label.height(),
-            Qt.KeepAspectRatio, Qt.SmoothTransformation
-        )
-        self.preview_label.setPixmap(pix)
-
-    def toggle_data_collection(self):
-        if not self.data_collection_active:
-            started = self.start_data_collection()
-            if started:
-                self.data_collection_active = True
-                self.btn_data_toggle.setText("Stop Data Collection")
-        else:
-            # остановка
-            self.stop_data_collection()
-            self.data_collection_active = False
-            self.btn_data_toggle.setText("Start Data Collection")
-
-    def toggle_training(self):
-        if not self.training_active:
-            # Start training
-            self.train_yolo()
-            self.btn_train_toggle.setText("Stop Training")
-            self.training_active = True
-        else:
-            # Stop training
-            self.stop_training()
-            self.btn_train_toggle.setText("Start Training")
-            self.training_active = False
+    # -------- Helpers ----------
+    def log_to_console(self, message):
+        self.console.append(message)
+        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
 
     def update_class_list(self):
         self.class_list.clear()
         for i, name in enumerate(self.config.get("classes", [])):
             self.class_list.addItem(f"{i}: {name}")
 
+    # -------- Class controls ----------
     def add_class(self):
         name = self.class_input.text().strip()
         if name and name not in self.config.setdefault("classes", []):
@@ -415,9 +372,33 @@ class YOLOApp(QWidget):
         else:
             self.console.append("No class selected.")
 
-    def log_to_console(self, message):
-        self.console.append(message)
-        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+    # -------- Train params persistence ----------
+    def persist_train_params(self):
+        # актуализируем last_data_yaml тоже
+        self.config["last_data_yaml"] = self.data_yaml_input.text().strip()
+        self.config["train_defaults"] = {
+            "epochs": int(self.epochs_input.value()),
+            "imgsz": int(self.imgsz_input.value()),
+            "batch": int(self.batch_input.value()),
+            "project_name": self.project_name_input.text().strip(),
+            "resume": bool(self.continue_checkbox.isChecked()),
+            "exist_ok": bool(self.exist_ok_checkbox.isChecked()),
+            "save_period": int(self.save_period_input.value())
+        }
+        self.save_config()
+
+    # -------- Data collection ----------
+    def toggle_data_collection(self):
+        if not self.data_collection_active:
+            started = self.start_data_collection()
+            if started:
+                self.data_collection_active = True
+                self.btn_data_toggle.setText("Stop Data Collection")
+        else:
+            # остановка
+            self.stop_data_collection()
+            self.data_collection_active = False
+            self.btn_data_toggle.setText("Start Data Collection")
 
     def start_data_collection(self):
         if not self.config.get("classes"):
@@ -477,25 +458,18 @@ class YOLOApp(QWidget):
         if hasattr(self, "btn_data_toggle"):
             self.btn_data_toggle.setText("Start Data Collection")
 
-    def browse_yaml_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Select data.yaml", "", "YAML Files (*.yaml *.yml)")
-        if path:
-            self.data_yaml_input.setText(path)
-            self.config["last_data_yaml"] = path
-            self.save_config()
-
-    def split_dataset(self):
-        self.console.append("Splitting dataset…")
-        os.system('python splitDatasetFiles.py')
-
-    def stop_training(self):
-        if self.trainer_thread and self.trainer_thread.isRunning():
-            self.console.append("[INFO] Interrupting training...")
-            self.trainer_thread.terminate()
-            self.trainer_thread.wait()
-            self.console.append("[INFO] Training was forcefully stopped.")
-        self.training_active = False
-        self.btn_train_toggle.setText("Start Training")
+    # -------- Training ----------
+    def toggle_training(self):
+        if not self.training_active:
+            # Start training
+            self.train_yolo()
+            self.btn_train_toggle.setText("Stop Training")
+            self.training_active = True
+        else:
+            # Stop training
+            self.stop_training()
+            self.btn_train_toggle.setText("Start Training")
+            self.training_active = False
 
     def train_yolo(self):
         data_path = self.data_yaml_input.text().strip()
@@ -529,6 +503,15 @@ class YOLOApp(QWidget):
         self.training_active = True
         self.console.append("Training started...")
 
+    def stop_training(self):
+        if self.trainer_thread and self.trainer_thread.isRunning():
+            self.console.append("[INFO] Interrupting training...")
+            self.trainer_thread.terminate()
+            self.trainer_thread.wait()
+            self.console.append("[INFO] Training was forcefully stopped.")
+        self.training_active = False
+        self.btn_train_toggle.setText("Start Training")
+
     def training_finished(self, success):
         if success:
             self.console.append("[INFO] ✅ Training completed successfully.")
@@ -539,6 +522,44 @@ class YOLOApp(QWidget):
         self.training_active = False
         self.btn_def.setEnabled(True)
 
+    # -------- Misc ----------
+    def show_model_classes(self):
+        model_path = self.config.get("model_path", "")
+        if not os.path.isfile(model_path):
+            self.console.append(f"[ERROR] Model not found at path: {model_path}")
+            return
+
+        try:
+            model = YOLO(model_path)
+            names = model.names
+            self.console.append("[INFO] Model classes:")
+            for i, name in names.items():
+                self.console.append(f"  {i}: {name}")
+        except Exception as e:
+            self.console.append(f"[ERROR] Failed to load model: {e}")
+
+    def display_frame(self, frame):
+        rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb_image.shape
+        bytes_per_line = ch * w
+        qimg = QImage(rgb_image.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pix = QPixmap.fromImage(qimg).scaled(
+            self.preview_label.width(), self.preview_label.height(),
+            Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
+        self.preview_label.setPixmap(pix)
+
+    def browse_yaml_file(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select data.yaml", "", "YAML Files (*.yaml *.yml)")
+        if path:
+            self.data_yaml_input.setText(path)
+            self.config["last_data_yaml"] = path
+            self.save_config()
+
+    def split_dataset(self):
+        self.console.append("Splitting dataset…")
+        os.system('python splitDatasetFiles.py')
+
     def open_config_dialog(self):
         dlg = ConfigDialog(self.config)
         if dlg.exec_():
@@ -546,31 +567,40 @@ class YOLOApp(QWidget):
 
     def restore_default_config(self):
         default = {
-            "model_path": "models/sunxds_0.7.6.pt",
-            "classes": ["class_player", "class_head"],
-            "class_map": {
-                "class_player": 0,
-                "class_bot": 99,
-                "class_weapon": 99,
-                "class_outline": 99,
-                "class_dead_body": 99,
-                "class_hideout_target_human": 99,
-                "class_hideout_target_balls": 99,
-                "class_head": 7,
-                "class_smoke": 99,
-                "class_fire": 99,
-                "class_third_person": 99
-            },
-            "grabber": {
-                "crop_size": 0.8,
-                "width": 640,
-                "height": 640
-            },
-            "output_folder": "dataset_output",
-            "save_interval": 3,
-            "detection_threshold": 0.35,
-            "data_folder": "dataset_output",
-            "last_data_yaml": "E:/Project/PythonProjects/YolovTrainGui/datasets/Valorant/data - Copy.yaml"
+            {
+                "model_path": "models/sunxds_0.7.6.pt",
+                "classes": [
+                    "player",
+                    "bot",
+                    "weapon",
+                    "outline",
+                    "dead_body",
+                    "hideout_target_human",
+                    "hideout_target_balls",
+                    "head",
+                    "smoke",
+                    "fire",
+                    "third_person"
+                ],
+                "class_map": {},
+                "grabber": {
+                    "crop_size": 0.8,
+                    "width": 547,
+                    "height": 259
+                },
+                "output_folder": "dataset_output",
+                "save_interval": 6,
+                "detection_threshold": 0.4,
+                "data_folder": "stream/dataset",
+                "last_data_yaml": "datasets/data.yaml",
+                "train_defaults": {
+                    "epochs": 26,
+                    "imgsz": 640,
+                    "batch": 16,
+                    "project_name": "runs/name",
+                    "save_period": 95
+                }
+            }
         }
         self.config = default
         self.save_config()
