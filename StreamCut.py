@@ -9,11 +9,6 @@ from pathlib import Path
 from ultralytics import YOLO
 import logging
 
-
-#TODO: Сделать классовую метку. ПРимер Оригинальная модель имеет 7 классов, а мы захватываем только 0, 4, 7. В итоге, классовые метки в выводе будет 0, 1, 2. Взять пример из semi
-
-#TODO: Сдлеать отдельный скрипт который исправит метки в лейблах. сейчас там 0, 4, 7. А модель рассчитана на 0 , 1 , 2
-
 # Показывать в консоли только warning+ от Ultralytics
 logging.getLogger('ultralytics').setLevel(logging.WARNING)
 
@@ -42,7 +37,11 @@ class StreamCut:
         self.time_interval       = cfg["time_interval"]
         self.detection_threshold = cfg["detection_threshold"]
         self.model_path          = cfg["model_path"]
-        self.class_map           = cfg["class_map"]
+        self.class_names = cfg.get("classes", None)
+        self.twitch_cookies_path = cfg.get("twitch_cookies_path", None)
+
+        # ——— Размер сохранения скринов ———
+        self.crop_size = 1000
 
         # ——— Параллельность ———
         self.max_download_workers = cfg["max_download_workers"]
@@ -62,16 +61,57 @@ class StreamCut:
         print(msg)
 
     def download_all(self):
-        """Параллельно скачиваем VOD в raw_stream_folder."""
+        """Параллельно скачиваем VOD в raw_stream_folder. Сначала без cookies, если не выйдет — пробуем с cookies."""
+
+        # Проверяем файл cookies
+        if getattr(self, "twitch_cookies_path", None):
+            if not os.path.isfile(self.twitch_cookies_path):
+                raise FileNotFoundError(
+                    f"[ERROR] Файл cookies не найден: {self.twitch_cookies_path}\n"
+                    f"Проверь путь в конфиге."
+                )
+            if os.path.getsize(self.twitch_cookies_path) == 0:
+                raise ValueError(
+                    f"[ERROR] Файл cookies пустой: {self.twitch_cookies_path}\n"
+                    f"Экспортируй cookies из браузера в формате Netscape."
+                )
+            # Простейшая проверка формата Netscape (должна быть строка с 'twitch.tv')
+            with open(self.twitch_cookies_path, "r", encoding="utf-8", errors="ignore") as f:
+                data = f.read()
+                if "twitch.tv" not in data:
+                    raise ValueError(
+                        f"[ERROR] Файл cookies не похож на twitch cookies: {self.twitch_cookies_path}"
+                    )
+
         def dl(url):
-            cmd = [
+            base_cmd = [
                 "yt-dlp",
                 "--download-archive", self.download_archive,
                 "--output", os.path.join(self.raw_stream_folder, "%(id)s.%(ext)s"),
+                "--format", "best",
                 url
             ]
-            subprocess.run(cmd, check=True)
-            self.log(f"[DOWNLOAD] {url}")
+
+            # Пробуем без cookies
+            try:
+                subprocess.run(base_cmd, check=True)
+                self.log(f"[DOWNLOAD] {url} (без cookies)")
+                return
+            except subprocess.CalledProcessError as e:
+                self.log(f"[WARNING] {url} — требуется авторизация, пробую с cookies")
+                self.log(f"[yt-dlp output]\n{e}")
+
+            # Пробуем с cookies
+            if getattr(self, "twitch_cookies_path", None):
+                cmd_with_cookies = base_cmd + ["--cookies", self.twitch_cookies_path]
+                try:
+                    subprocess.run(cmd_with_cookies, check=True)
+                    self.log(f"[DOWNLOAD] {url} (с cookies)")
+                except subprocess.CalledProcessError as e:
+                    self.log(f"[ERROR] Не удалось скачать {url} даже с cookies")
+                    self.log(f"[yt-dlp output]\n{e}")
+            else:
+                self.log(f"[ERROR] Нет cookies файла для {url}")
 
         with ThreadPoolExecutor(max_workers=self.max_download_workers) as ex:
             ex.map(dl, self.video_sources)
@@ -141,8 +181,9 @@ class StreamCut:
 
     def process_all(self):
         """
-        Обходим .ts-чанки, делаем инференс и сохраняем кадры,
-        с прогрессом в resume_info_file, центрированный 640×640 crop.
+        Обрабатывает .ts-чанки: выполняет инференс моделью YOLO,
+        сохраняет изображения и метки в YOLO-формате.
+        Поддерживает фильтрацию по именам классов и переиндексацию.
         """
         os.makedirs(os.path.dirname(self.resume_info_file), exist_ok=True)
         if os.path.exists(self.resume_info_file):
@@ -157,6 +198,28 @@ class StreamCut:
         resume_lock = threading.Lock()
         save_q = Queue()
 
+        # ——— Классы из модели ———
+        self.original_classes = self.model.model.names  # {0: 'person', 1: 'car', ...}
+
+        # ——— Если задан class_names — фильтруем по имени, иначе сохраняем всё ———
+        if hasattr(self, "class_names"):
+            self.class_names = [str(n).strip().lower() for n in self.class_names]
+            self.class_index_map = {
+                orig_idx: new_idx
+                for new_idx, (orig_idx, name) in enumerate([
+                    (i, n) for i, n in self.original_classes.items()
+                    if n.lower() in self.class_names
+                ])
+            }
+            self.log(f"[INFO] Используем классы: {self.class_index_map}")
+        elif hasattr(self, "class_map"):
+            self.class_map = {int(k): int(v) for k, v in self.class_map.items()}
+            self.class_index_map = {v: k for k, v in self.class_map.items()}
+            self.log(f"[INFO] Используем class_map: {self.class_index_map}")
+        else:
+            self.class_index_map = None
+            self.log(f"[INFO] Классы не фильтруются. Сохраняем все.")
+
         def saver():
             while True:
                 itm = save_q.get()
@@ -166,7 +229,7 @@ class StreamCut:
                 cv2.imwrite(img_p, frame)
                 with open(lbl_p, 'w') as fw:
                     fw.write("\n".join(lines) + "\n")
-                self.log(f"[INFO] Saved {name} ({len(lines)} labels)")
+                self.log(f"[SAVE] {name} ({len(lines)} объектов)")
                 save_q.task_done()
 
         savers = []
@@ -197,24 +260,33 @@ class StreamCut:
                 if not ret:
                     break
 
-                # Центрированный crop 640×640
                 h, w = frame.shape[:2]
-                x0, y0 = (w-640)//2, (h-640)//2
-                crop = frame[y0:y0+640, x0:x0+640]
+                crop_size = self.crop_size
+
+                x0, y0 = (w - crop_size) // 2, (h - crop_size) // 2
+                crop = frame[y0:y0 + crop_size, x0:x0 + crop_size]
 
                 if idx % self.time_interval == 0:
-                    results = self.model(crop, imgsz=(640,640), conf=self.detection_threshold)
+                    results = self.model(crop, imgsz=(640, 640), conf=self.detection_threshold)
                     lines = []
                     for r in results:
                         for box, cls in zip(r.boxes.xyxy, r.boxes.cls):
-                            cid = int(cls)
-                            if cid in self.class_map.values():
-                                x1, y1, x2, y2 = box
-                                cx = ((x1+x2)/2)/640
-                                cy = ((y1+y2)/2)/640
-                                bw = (x2-x1)/640
-                                bh = (y2-y1)/640
-                                lines.append(f"{cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
+                            original_cid = int(cls)
+
+                            if self.class_index_map is None:
+                                new_cid = original_cid
+                            elif original_cid in self.class_index_map:
+                                new_cid = self.class_index_map[original_cid]
+                            else:
+                                continue  # класс не в списке — пропустить
+
+                            x1, y1, x2, y2 = box
+                            cx = ((x1 + x2) / 2) / crop_size
+                            cy = ((y1 + y2) / 2) / crop_size
+                            bw = (x2 - x1) / crop_size
+                            bh = (y2 - y1) / crop_size
+
+                            lines.append(f"{new_cid} {cx:.6f} {cy:.6f} {bw:.6f} {bh:.6f}")
 
                     if lines:
                         name = f"{base}_{idx:05d}.jpg"

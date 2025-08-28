@@ -93,14 +93,20 @@ class ConfigDialog(QDialog):
         layout.addWidget(btn_model)
 
         self.crop_size_input = QDoubleSpinBox()
+        self.crop_size_input.setSingleStep(0.01)
+        self.crop_size_input.setRange(0.0, 1.0)
         self.crop_size_input.setValue(self.config.get("grabber", {}).get("crop_size", 0.8))
         layout.addRow("Crop Size:", self.crop_size_input)
 
         self.width_input = QSpinBox()
+        self.width_input.setRange(1, 3840)
+        self.width_input.setSingleStep(1)
         self.width_input.setValue(self.config.get("grabber", {}).get("width", 640))
         layout.addRow("Width:", self.width_input)
 
         self.height_input = QSpinBox()
+        self.height_input.setRange(1, 2160)
+        self.height_input.setSingleStep(1)
         self.height_input.setValue(self.config.get("grabber", {}).get("height", 640))
         layout.addRow("Height:", self.height_input)
 
@@ -256,17 +262,30 @@ class YOLOApp(QWidget):
         data_layout.addWidget(btn_browse_yaml)
         form.addRow("Data yaml:", data_layout)
 
-        self.epochs_input = QSpinBox(); self.epochs_input.setValue(50)
+        td = self.config.get("train_defaults", {})
+
+        self.epochs_input = QSpinBox()
+        self.epochs_input.setRange(1, 100000)
+        self.epochs_input.setValue(int(td.get("epochs", 50)))
         form.addRow("Epochs:", self.epochs_input)
+
         self.imgsz_input = QSpinBox()
-        self.imgsz_input.setRange(320, 640)
-        self.imgsz_input.setValue(640)
+        self.imgsz_input.setRange(32, 4096)
+        self.imgsz_input.setSingleStep(32)
+        self.imgsz_input.setValue(int(td.get("imgsz", 640)))
         form.addRow("Imgsz:", self.imgsz_input)
-        self.batch_input = QSpinBox(); self.batch_input.setValue(16)
+
+        self.batch_input = QSpinBox()
+        self.batch_input.setRange(1, 4096)
+        self.batch_input.setValue(int(td.get("batch", 16)))
         form.addRow("Batch:", self.batch_input)
+
         self.project_name_input = QLineEdit()
+        self.project_name_input.setText(td.get("project_name", ""))
         form.addRow("Project Name:", self.project_name_input)
+
         self.continue_checkbox = QCheckBox("Continue Training (resume)")
+        self.continue_checkbox.setChecked(bool(td.get("resume", False)))
         form.addRow("", self.continue_checkbox)
 
         grp.setLayout(form)
@@ -280,9 +299,17 @@ class YOLOApp(QWidget):
         btn_cfg.clicked.connect(self.open_config_dialog)
         layout.addWidget(btn_cfg)
 
-        btn_def = QPushButton("Restore Default Config")
-        btn_def.clicked.connect(self.restore_default_config)
-        layout.addWidget(btn_def)
+        self.btn_def = QPushButton("Restore Default Config")
+        self.btn_def.clicked.connect(self.restore_default_config)
+        layout.addWidget(self.btn_def)
+
+        # сохраняем при любом изменении
+        self.data_yaml_input.editingFinished.connect(self.persist_train_params)
+        self.epochs_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.imgsz_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.batch_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.project_name_input.textEdited.connect(lambda _: self.persist_train_params())
+        self.continue_checkbox.toggled.connect(lambda _: self.persist_train_params())
 
         self.setLayout(layout)
 
@@ -300,6 +327,18 @@ class YOLOApp(QWidget):
                 self.console.append(f"  {i}: {name}")
         except Exception as e:
             self.console.append(f"[ERROR] Failed to load model: {e}")
+
+    def persist_train_params(self):
+        # актуализируем last_data_yaml тоже
+        self.config["last_data_yaml"] = self.data_yaml_input.text().strip()
+        self.config["train_defaults"] = {
+            "epochs": int(self.epochs_input.value()),
+            "imgsz": int(self.imgsz_input.value()),
+            "batch": int(self.batch_input.value()),
+            "project_name": self.project_name_input.text().strip(),
+            "resume": bool(self.continue_checkbox.isChecked())
+        }
+        self.save_config()
 
     def display_frame(self, frame):
         rgb_image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
