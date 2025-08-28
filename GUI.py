@@ -43,6 +43,7 @@ class TrainerThread(QThread):
                 resume=self.params["resume"],
                 exist_ok=self.params["exist_ok"],
                 save_period=self.params["save_period"],
+                patience=self.params["patience"],
                 log=log
             )
             self.finished.emit(exit_code == 0)
@@ -309,6 +310,11 @@ class YOLOApp(QWidget):
         self.save_period_input.setValue(int(td.get("save_period", 100)))
         form.addRow("Save period (epochs):", self.save_period_input)
 
+        self.patience_input = QSpinBox()
+        self.patience_input.setRange(0, 100)
+        self.patience_input.setValue(int(td.get("patience", 20)))
+        form.addRow("Early stopping patience %:", self.patience_input)
+
         grp.setLayout(form)
         layout.addWidget(grp)
 
@@ -335,6 +341,7 @@ class YOLOApp(QWidget):
         self.continue_checkbox.toggled.connect(lambda _: self.persist_train_params())
         self.exist_ok_checkbox.toggled.connect(lambda _: self.persist_train_params())
         self.save_period_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.patience_input.valueChanged.connect(lambda _: self.persist_train_params())
 
         self.setLayout(layout)
 
@@ -383,7 +390,8 @@ class YOLOApp(QWidget):
             "project_name": self.project_name_input.text().strip(),
             "resume": bool(self.continue_checkbox.isChecked()),
             "exist_ok": bool(self.exist_ok_checkbox.isChecked()),
-            "save_period": int(self.save_period_input.value())
+            "save_period": int(self.save_period_input.value()),
+            "patience": int(self.patience_input.value())
         }
         self.save_config()
 
@@ -490,7 +498,8 @@ class YOLOApp(QWidget):
             "project": self.project_name_input.text().strip() or "runs/train",
             "resume": self.continue_checkbox.isChecked(),
             "exist_ok": self.exist_ok_checkbox.isChecked(),
-            "save_period": self.save_period_input.value()
+            "save_period": self.save_period_input.value(),
+            "patience": self.patience_input.value()
         }
 
         # Запускаем обучение в QThread
@@ -598,7 +607,8 @@ class YOLOApp(QWidget):
                     "imgsz": 640,
                     "batch": 16,
                     "project_name": "runs/name",
-                    "save_period": 95
+                    "save_period": 50,
+                    "patience": 20
                 }
             }
         }

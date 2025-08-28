@@ -26,7 +26,8 @@ def train_yolo(
     exist_ok=True,
     save_period=100,
     log=print,
-    stop_callback=lambda: False
+    stop_callback=lambda: False,
+    patience = 20
 ):
     try:
         if device is None:
@@ -63,8 +64,8 @@ def train_yolo(
             project=project,
             name=name,
             exist_ok=exist_ok,
-            resume=False,
-            patience=20,
+            resume=resume,
+            patience=patience,
             amp=True,
             plots=True,
             save_json=True,
