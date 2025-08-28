@@ -43,6 +43,8 @@ class TrainerThread(QThread):
                 project=self.params["project"],
                 name="auto",
                 resume=self.params["resume"],
+                exist_ok=self.params["exist_ok"],
+                save_period=self.params["save_period"],
                 log=log
             )
             self.finished.emit(exit_code == 0)
@@ -183,6 +185,7 @@ class YOLOApp(QWidget):
         self.capture_thread = None
 
         self.training_active = False
+        self.data_collection_active = False
 
         self.init_ui()
 
@@ -233,13 +236,9 @@ class YOLOApp(QWidget):
         splitter.setSizes([200, 300])
         layout.addWidget(splitter)
 
-        btn_start = QPushButton("Start Data Collection")
-        btn_start.clicked.connect(self.start_data_collection)
-        layout.addWidget(btn_start)
-
-        btn_stop = QPushButton("Stop Data Collection")
-        btn_stop.clicked.connect(self.stop_data_collection)
-        layout.addWidget(btn_stop)
+        self.btn_data_toggle = QPushButton("Start Data Collection")
+        self.btn_data_toggle.clicked.connect(self.toggle_data_collection)
+        layout.addWidget(self.btn_data_toggle)
 
         btn_split = QPushButton("Split Dataset")
         btn_split.clicked.connect(self.split_dataset)
@@ -288,6 +287,15 @@ class YOLOApp(QWidget):
         self.continue_checkbox.setChecked(bool(td.get("resume", False)))
         form.addRow("", self.continue_checkbox)
 
+        self.exist_ok_checkbox = QCheckBox("Overwrite run folder if exists (exist_ok)")
+        self.exist_ok_checkbox.setChecked(bool(td.get("exist_ok", True)))
+        form.addRow("", self.exist_ok_checkbox)
+
+        self.save_period_input = QSpinBox()
+        self.save_period_input.setRange(0, 200)
+        self.save_period_input.setValue(int(td.get("save_period", 100)))
+        form.addRow("Save period (epochs):", self.save_period_input)
+
         grp.setLayout(form)
         layout.addWidget(grp)
 
@@ -310,6 +318,8 @@ class YOLOApp(QWidget):
         self.batch_input.valueChanged.connect(lambda _: self.persist_train_params())
         self.project_name_input.textEdited.connect(lambda _: self.persist_train_params())
         self.continue_checkbox.toggled.connect(lambda _: self.persist_train_params())
+        self.exist_ok_checkbox.toggled.connect(lambda _: self.persist_train_params())
+        self.save_period_input.valueChanged.connect(lambda _: self.persist_train_params())
 
         self.setLayout(layout)
 
@@ -336,7 +346,9 @@ class YOLOApp(QWidget):
             "imgsz": int(self.imgsz_input.value()),
             "batch": int(self.batch_input.value()),
             "project_name": self.project_name_input.text().strip(),
-            "resume": bool(self.continue_checkbox.isChecked())
+            "resume": bool(self.continue_checkbox.isChecked()),
+            "exist_ok": bool(self.exist_ok_checkbox.isChecked()),
+            "save_period": int(self.save_period_input.value())
         }
         self.save_config()
 
@@ -350,6 +362,18 @@ class YOLOApp(QWidget):
             Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
         self.preview_label.setPixmap(pix)
+
+    def toggle_data_collection(self):
+        if not self.data_collection_active:
+            started = self.start_data_collection()
+            if started:
+                self.data_collection_active = True
+                self.btn_data_toggle.setText("Stop Data Collection")
+        else:
+            # остановка
+            self.stop_data_collection()
+            self.data_collection_active = False
+            self.btn_data_toggle.setText("Start Data Collection")
 
     def toggle_training(self):
         if not self.training_active:
@@ -398,30 +422,31 @@ class YOLOApp(QWidget):
     def start_data_collection(self):
         if not self.config.get("classes"):
             self.console.append("[ERROR] No classes selected for collection.")
-            return
+            return False
 
-        # Загружаем модель YOLO
-        model = YOLO(self.config["model_path"], verbose=False)
-        model_names = model.names  # {0: 'class_player', 1: 'class_head', ...}
+        try:
+            model = YOLO(self.config["model_path"], verbose=False)
+        except Exception as e:
+            self.console.append(f"[ERROR] Failed to load model: {e}")
+            return False
+
+        model_names = model.names
         self.console.append(f"[DEBUG] model.names: {model_names}")
 
-        # Создаём reverse-словарь { 'class_player': 0, ... }
         reverse_names = {v: k for k, v in model_names.items()}
 
-        # Строим class_map для всех классов из config["classes"]
         class_map = {}
         for class_name in self.config["classes"]:
             if class_name in reverse_names:
                 class_map[class_name] = reverse_names[class_name]
             else:
                 self.console.append(f"[WARNING] Class '{class_name}' not found in model.names.")
-                class_map[class_name] = 99  # 99 = игнорируемый класс
+                class_map[class_name] = 99
 
         self.config["class_map"] = class_map
         self.console.append(f"[INFO] Class map: {class_map}")
         self.console.append(f"[INFO] Detection threshold: {self.config.get('detection_threshold')}")
 
-        # Пересоздаём ScreenCapture каждый раз с актуальным конфигом
         self.capture = ScreenCapture(
             config=self.config,
             output_folder=self.config["output_folder"],
@@ -431,7 +456,10 @@ class YOLOApp(QWidget):
         self.console.append("Starting data collection…")
         self.capture_thread = CaptureThread(self.capture)
         self.capture_thread.frame_signal.connect(self.display_frame)
+        # Если поток завершится сам (по ошибке/по стопу) — вернуть кнопку в исходное состояние
+        self.capture_thread.finished.connect(self.on_data_collection_finished)
         self.capture_thread.start()
+        return True
 
     def stop_data_collection(self):
         if self.capture:
@@ -442,6 +470,12 @@ class YOLOApp(QWidget):
             self.capture = None
         else:
             self.console.append("Data collection was not running.")
+
+    def on_data_collection_finished(self):
+        # поток завершился — вернуть кнопку и флаг
+        self.data_collection_active = False
+        if hasattr(self, "btn_data_toggle"):
+            self.btn_data_toggle.setText("Start Data Collection")
 
     def browse_yaml_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select data.yaml", "", "YAML Files (*.yaml *.yml)")
@@ -480,7 +514,9 @@ class YOLOApp(QWidget):
             "imgsz": self.imgsz_input.value(),
             "batch": self.batch_input.value(),
             "project": self.project_name_input.text().strip() or "runs/train",
-            "resume": self.continue_checkbox.isChecked()
+            "resume": self.continue_checkbox.isChecked(),
+            "exist_ok": self.exist_ok_checkbox.isChecked(),
+            "save_period": self.save_period_input.value()
         }
 
         # Запускаем обучение в QThread
