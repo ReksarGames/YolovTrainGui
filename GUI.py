@@ -461,68 +461,6 @@ class StreamCutDialog(QDialog):
             target_input.setText(folder)
 
 
-# -------------------- Benchmark Dialog --------------------
-class BenchmarkDialog(QDialog):
-    def __init__(self, log_callback=None, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Benchmark")
-        self.setGeometry(200, 200, 600, 200)
-        self.log_callback = log_callback
-        self.thread = None
-        self.init_ui()
-
-    def init_ui(self):
-        layout = QFormLayout()
-
-        self.models_dir_input = QLineEdit()
-        models_layout = QHBoxLayout()
-        models_layout.addWidget(self.models_dir_input)
-        btn_models = QPushButton("...")
-        btn_models.setFixedWidth(32)
-        btn_models.clicked.connect(lambda: self.browse_folder(self.models_dir_input))
-        models_layout.addWidget(btn_models)
-        layout.addRow("Models dir:", models_layout)
-
-        self.images_dir_input = QLineEdit()
-        images_layout = QHBoxLayout()
-        images_layout.addWidget(self.images_dir_input)
-        btn_images = QPushButton("...")
-        btn_images.setFixedWidth(32)
-        btn_images.clicked.connect(lambda: self.browse_folder(self.images_dir_input))
-        images_layout.addWidget(btn_images)
-        layout.addRow("Images dir:", images_layout)
-
-        btn_layout = QHBoxLayout()
-        self.btn_run = QPushButton("Run Benchmark")
-        self.btn_run.clicked.connect(self.run_benchmark)
-        btn_layout.addStretch()
-        btn_layout.addWidget(self.btn_run)
-        layout.addRow("", btn_layout)
-
-        self.setLayout(layout)
-
-    def browse_folder(self, target_input):
-        folder = QFileDialog.getExistingDirectory(self, "Select Folder", target_input.text().strip())
-        if folder:
-            target_input.setText(folder)
-
-    def run_benchmark(self):
-        if self.thread and self.thread.isRunning():
-            return
-        models_dir = self.models_dir_input.text().strip() or None
-        images_dir = self.images_dir_input.text().strip() or None
-        self.btn_run.setEnabled(False)
-        self.thread = BenchmarkThread(models_dir=models_dir, images_dir=images_dir)
-        if self.log_callback:
-            self.thread.log_signal.connect(self.log_callback)
-        self.thread.finished.connect(self.on_finished)
-        self.thread.start()
-
-    def on_finished(self, ok):
-        if self.log_callback:
-            self.log_callback("[INFO] Benchmark finished." if ok else "[ERROR] Benchmark failed.")
-        self.btn_run.setEnabled(True)
-
     def load_config(self, path):
         try:
             with open(path, 'r') as f:
@@ -779,6 +717,68 @@ class BenchmarkDialog(QDialog):
                 return f"{num:.2f} {unit}"
             num /= 1024.0
         return f"{num:.2f} PB"
+
+# -------------------- Benchmark Dialog --------------------
+class BenchmarkDialog(QDialog):
+    def __init__(self, log_callback=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Benchmark")
+        self.setGeometry(200, 200, 600, 200)
+        self.log_callback = log_callback
+        self.thread = None
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QFormLayout()
+
+        self.models_dir_input = QLineEdit()
+        models_layout = QHBoxLayout()
+        models_layout.addWidget(self.models_dir_input)
+        btn_models = QPushButton("...")
+        btn_models.setFixedWidth(32)
+        btn_models.clicked.connect(lambda: self.browse_folder(self.models_dir_input))
+        models_layout.addWidget(btn_models)
+        layout.addRow("Models dir:", models_layout)
+
+        self.images_dir_input = QLineEdit()
+        images_layout = QHBoxLayout()
+        images_layout.addWidget(self.images_dir_input)
+        btn_images = QPushButton("...")
+        btn_images.setFixedWidth(32)
+        btn_images.clicked.connect(lambda: self.browse_folder(self.images_dir_input))
+        images_layout.addWidget(btn_images)
+        layout.addRow("Images dir:", images_layout)
+
+        btn_layout = QHBoxLayout()
+        self.btn_run = QPushButton("Run Benchmark")
+        self.btn_run.clicked.connect(self.run_benchmark)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_run)
+        layout.addRow("", btn_layout)
+
+        self.setLayout(layout)
+
+    def browse_folder(self, target_input):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", target_input.text().strip())
+        if folder:
+            target_input.setText(folder)
+
+    def run_benchmark(self):
+        if self.thread and self.thread.isRunning():
+            return
+        models_dir = self.models_dir_input.text().strip() or None
+        images_dir = self.images_dir_input.text().strip() or None
+        self.btn_run.setEnabled(False)
+        self.thread = BenchmarkThread(models_dir=models_dir, images_dir=images_dir)
+        if self.log_callback:
+            self.thread.log_signal.connect(self.log_callback)
+        self.thread.finished.connect(self.on_finished)
+        self.thread.start()
+
+    def on_finished(self, ok):
+        if self.log_callback:
+            self.log_callback("[INFO] Benchmark finished." if ok else "[ERROR] Benchmark failed.")
+        self.btn_run.setEnabled(True)
 
 # -------------------- Config Dialog --------------------
 class ConfigDialog(QDialog):
