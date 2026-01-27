@@ -104,21 +104,57 @@ def draw_labels_on_image(image_path, label_path):
         font = cv2.FONT_HERSHEY_SIMPLEX
         cv2.putText(image, label_text, (x1, max(y1 - 10, 20)), font, 0.6, class_color, 2, cv2.LINE_AA)
 
-    display_current_class(image)
-
     return image, current_labels
 
 
 def display_current_class(image):
     global current_class_id
+    if not class_names:
+        return
     text = f"Current class: {class_names[current_class_id]}"
     font = cv2.FONT_HERSHEY_SIMPLEX
     cv2.putText(image, text, (10, 30), font, 1, (255, 255, 255), 2, cv2.LINE_AA)
 
 
 def update_image_window(image):
-    cv2.imshow('Image with Labels', image)
+    if image is None:
+        return
+    view = image.copy()
+    display_current_class(view)
+    draw_hotkeys(view)
+    cv2.imshow('Image with Labels', view)
     cv2.waitKey(1)
+
+
+def window_closed():
+    try:
+        return cv2.getWindowProperty('Image with Labels', cv2.WND_PROP_VISIBLE) < 1
+    except Exception:
+        return False
+
+
+def draw_hotkeys(image):
+    h, w = image.shape[:2]
+    lines = [
+        "Hotkeys: D=save+next  A=save+prev  W/S=class  H=delete  Q=quit",
+        "Mouse: RMB drag=add box  LMB drag=remove box",
+    ]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.5
+    thickness = 1
+    padding = 6
+    line_height = 18
+    box_height = padding * 2 + line_height * len(lines)
+    y0 = h - box_height
+    if y0 < 0:
+        y0 = 0
+    overlay = image.copy()
+    cv2.rectangle(overlay, (0, y0), (w, h), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.6, image, 0.4, 0, image)
+    y = y0 + padding + line_height - 4
+    for line in lines:
+        cv2.putText(image, line, (10, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+        y += line_height
 
 
 def click_and_crop(event, x, y, flags, param):
@@ -132,14 +168,14 @@ def click_and_crop(event, x, y, flags, param):
         if cropping:
             temp_image = image_copy.copy()
             cv2.rectangle(temp_image, ref_point[0], (x, y), (0, 255, 0), 2)
-            cv2.imshow("Image with Labels", temp_image)
+            update_image_window(temp_image)
 
     elif event == cv2.EVENT_RBUTTONUP:
         ref_point.append((x, y))
         cropping = False
 
         cv2.rectangle(image_copy, ref_point[0], ref_point[1], (0, 255, 0), 2)
-        cv2.imshow("Image with Labels", image_copy)
+        update_image_window(image_copy)
 
         add_label_from_selected_area(ref_point)
 
@@ -221,25 +257,47 @@ def browse_images(data_folder):
     image_folder = os.path.join(data_folder, 'images')
     label_folder = os.path.join(data_folder, 'labels')
 
-    image_files = [f for f in os.listdir(image_folder) if f.endswith(('.png', '.jpg', '.jpeg'))]
-    image_files.sort()
+    def list_images():
+        if not os.path.isdir(image_folder):
+            return []
+        files = [f for f in os.listdir(image_folder) if f.endswith(('.png', '.jpg', '.jpeg'))]
+        files.sort()
+        return files
+
+    image_files = list_images()
     current_image_index = 0
 
-    while 0 <= current_image_index < len(image_files):
-        image_path = os.path.join(image_folder, image_files[current_image_index])
-        label_name = os.path.splitext(image_files[current_image_index])[0] + '.txt'
+    while True:
+        if not image_files:
+            print("No images found.")
+            break
+
+        current_image_index = max(0, min(current_image_index, len(image_files) - 1))
+        image_name = image_files[current_image_index]
+        image_path = os.path.join(image_folder, image_name)
+        label_name = os.path.splitext(image_name)[0] + '.txt'
         label_path = os.path.join(label_folder, label_name)
 
         image, labels = draw_labels_on_image(image_path, label_path)
+        if image is None:
+            image_files = list_images()
+            continue
         image_copy = image.copy()
 
         if image is not None:
-            cv2.imshow('Image with Labels', image_copy)
+            update_image_window(image_copy)
             cv2.setMouseCallback("Image with Labels", click_and_crop)
 
         print(f"Current Class: {class_names[current_class_id]}")
 
-        key = cv2.waitKey(0)
+        key = -1
+        while True:
+            if window_closed():
+                cv2.destroyAllWindows()
+                return
+            key = cv2.waitKey(30)
+            if key != -1:
+                break
 
         if key == ord('d'):
             # Save changes and move to the next image
@@ -251,11 +309,17 @@ def browse_images(data_folder):
             current_image_index -= 1
         elif key == ord('h'):
             # Delete current image and labels file
-            os.remove(image_path)
-            if os.path.exists(label_path):
-                os.remove(label_path)
+            try:
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+                if os.path.exists(label_path):
+                    os.remove(label_path)
+            except Exception as e:
+                print(f"Delete failed: {e}")
             print(f"Deleted: {image_path} and {label_path}")
-            current_image_index += 1
+            image_files = list_images()
+            if current_image_index >= len(image_files):
+                current_image_index = len(image_files) - 1
         elif key == ord('q'):
             break
         elif key == ord('w'):
@@ -272,7 +336,6 @@ def switch_class(direction=1):
     global current_class_id
     current_class_id = (current_class_id + direction) % len(class_names)
     print(f"Switched to class: {class_names[current_class_id]}")
-    display_current_class(image_copy)
     update_image_window(image_copy)
 
 
@@ -280,4 +343,5 @@ config = load_config()
 
 generate_class_colors()
 
-browse_images(config['data_folder'])  # Folder containing "images" and "labels"
+label_folder = config.get("label_data_folder") or config.get("data_folder")
+browse_images(label_folder)  # Folder containing "images" and "labels"
