@@ -1,19 +1,24 @@
 import os
 import sys
 import json
+import subprocess
+import logging
+import time
+from pathlib import Path
 
 import cv2
 import numpy as np
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
-    QListWidget, QTextBrowser, QFileDialog, QFormLayout, QDoubleSpinBox,
-    QSpinBox, QDialog, QGroupBox, QHBoxLayout, QCheckBox, QSizePolicy, QSplitter
+    QListWidget, QListWidgetItem, QTextBrowser, QFileDialog, QFormLayout, QGridLayout, QDoubleSpinBox,
+    QSpinBox, QDialog, QGroupBox, QHBoxLayout, QCheckBox, QSizePolicy, QSplitter, QMessageBox,
+    QTextEdit, QTabWidget, QComboBox, QProgressBar
 )
-from PyQt5.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QEvent, QTimer
 from ultralytics import YOLO
-from semiauto_dataset_collector import ScreenCapture
-from train import train_yolo
+from Core.semiauto_dataset_collector import ScreenCapture
+from Core.train import train_yolo
 
 # -------------------- Training Thread --------------------
 class TrainerThread(QThread):
@@ -44,6 +49,7 @@ class TrainerThread(QThread):
                 exist_ok=self.params["exist_ok"],
                 save_period=self.params["save_period"],
                 patience=self.params["patience"],
+                overrides=self.params.get("overrides"),
                 log=log
             )
             self.finished.emit(exit_code == 0)
@@ -58,11 +64,13 @@ class TrainerThread(QThread):
 # -------------------- Capture Thread --------------------
 class CaptureThread(QThread):
     frame_signal = pyqtSignal(np.ndarray)
+    log_signal = pyqtSignal(str)
 
     def __init__(self, capture_instance):
         super().__init__()
         self.capture_instance = capture_instance
         self.capture_instance.on_frame_ready = self.emit_frame
+        self.capture_instance.log = lambda msg: self.log_signal.emit(str(msg))
 
     def emit_frame(self, frame):
         self.frame_signal.emit(frame)
@@ -70,13 +78,716 @@ class CaptureThread(QThread):
     def run(self):
         self.capture_instance.capture_and_display()
 
+# -------------------- StreamCut Thread --------------------
+class StreamCutThread(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(bool)
+    download_info_signal = pyqtSignal(dict)
+    download_progress_signal = pyqtSignal(dict)
+
+    def __init__(self, config_path, mode="all"):
+        super().__init__()
+        self.config_path = config_path
+        self.mode = mode
+        self.stop_requested = False
+        self.stream_cut = None
+
+    def run(self):
+        try:
+            from Core.StreamCut import StreamCut
+            stream_cut = StreamCut(self.config_path)
+            self.stream_cut = stream_cut
+            stream_cut.log = lambda msg: self.log_signal.emit(str(msg))
+            stream_cut.on_download_info = lambda info: self.download_info_signal.emit(info)
+            stream_cut.on_download_progress = lambda info: self.download_progress_signal.emit(info)
+            if self.mode == "download_only":
+                stream_cut.download_all()
+            elif self.mode == "process_only":
+                stream_cut.split_all()
+                stream_cut.process_all()
+                stream_cut.log("[DONE]")
+            else:
+                stream_cut.run()
+            self.finished.emit(True)
+        except Exception as e:
+            self.log_signal.emit(f"[ERROR] {e}")
+            self.finished.emit(False)
+
+    def request_stop(self):
+        self.stop_requested = True
+        if self.stream_cut:
+            self.stream_cut.stop()
+
+
+# -------------------- Benchmark Thread --------------------
+class BenchmarkThread(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(bool)
+
+    def __init__(self, models_dir=None, images_dir=None):
+        super().__init__()
+        self.models_dir = models_dir
+        self.images_dir = images_dir
+
+    def run(self):
+        try:
+            script_path = Path(__file__).resolve().parent / "benchmark" / "benchmark.py"
+            cmd = [sys.executable, str(script_path)]
+            if self.models_dir:
+                cmd += ["--models", self.models_dir]
+            if self.images_dir:
+                cmd += ["--images-dir", self.images_dir]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            for line in proc.stdout:
+                self.log_signal.emit(line.rstrip())
+            proc.wait()
+            self.finished.emit(proc.returncode == 0)
+        except Exception as e:
+            self.log_signal.emit(f"[ERROR] Benchmark failed: {e}")
+            self.finished.emit(False)
+
+# -------------------- StreamCut Dialog --------------------
+class StreamCutDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("StreamCut")
+        self.setGeometry(150, 150, 700, 700)
+        self.config = {}
+        self.stream_thread = None
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.timeout.connect(self.save_config)
+        self._stream_mode = "all"
+        self.init_ui()
+        self.load_config(self.config_path_input.text())
+
+    def create_download_dialog(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Download progress")
+        dialog.setModal(False)
+        dialog.setMinimumWidth(360)
+        layout = QFormLayout()
+
+        dialog.title_label = QLabel("-")
+        dialog.size_label = QLabel("-")
+        dialog.downloaded_label = QLabel("-")
+        dialog.speed_label = QLabel("-")
+        dialog.eta_label = QLabel("-")
+        dialog.progress_bar = QProgressBar()
+        dialog.progress_bar.setRange(0, 100)
+
+        layout.addRow("Title:", dialog.title_label)
+        layout.addRow("Size:", dialog.size_label)
+        layout.addRow("Downloaded:", dialog.downloaded_label)
+        layout.addRow("Speed:", dialog.speed_label)
+        layout.addRow("ETA:", dialog.eta_label)
+        layout.addRow("Progress:", dialog.progress_bar)
+        dialog.setLayout(layout)
+        return dialog
+
+    def init_ui(self):
+        layout = QVBoxLayout()
+
+        path_layout = QHBoxLayout()
+        default_path = Path(__file__).resolve().parent / "configs" / "configStreamCut.json"
+        self.config_path_input = QLineEdit(str(default_path))
+        btn_browse = QPushButton("Browse...")
+        btn_browse.clicked.connect(self.browse_config_path)
+        btn_load = QPushButton("Load")
+        btn_load.clicked.connect(lambda: self.load_config(self.config_path_input.text()))
+        path_layout.addWidget(QLabel("Config:"))
+        path_layout.addWidget(self.config_path_input)
+        path_layout.addWidget(btn_browse)
+        path_layout.addWidget(btn_load)
+        layout.addLayout(path_layout)
+
+        form = QFormLayout()
+
+        self.video_sources_input = QTextEdit()
+        self.video_sources_input.setPlaceholderText("One URL per line")
+        self.video_sources_input.setToolTip("List of VOD URLs, one per line.")
+        form.addRow("Video sources:", self.video_sources_input)
+
+        self.video_sources_list = QListWidget()
+        self.video_sources_list.setToolTip("Select which sources to download.")
+        form.addRow("Select sources:", self.video_sources_list)
+
+        sources_btns = QHBoxLayout()
+        btn_sync_sources = QPushButton("Sync")
+        btn_sync_sources.setToolTip("Sync checkbox list from text field.")
+        btn_sync_sources.clicked.connect(self.sync_video_sources_list)
+        btn_check_all = QPushButton("Check all")
+        btn_check_all.clicked.connect(lambda: self.set_sources_check_state(Qt.Checked))
+        btn_uncheck_all = QPushButton("Uncheck all")
+        btn_uncheck_all.clicked.connect(lambda: self.set_sources_check_state(Qt.Unchecked))
+        sources_btns.addWidget(btn_sync_sources)
+        sources_btns.addWidget(btn_check_all)
+        sources_btns.addWidget(btn_uncheck_all)
+        form.addRow("", sources_btns)
+
+        self.use_selected_only_checkbox = QCheckBox("Download only checked sources")
+        self.use_selected_only_checkbox.setToolTip("If enabled, StreamCut will download only checked sources.")
+        self.use_selected_only_checkbox.setChecked(True)
+        form.addRow("", self.use_selected_only_checkbox)
+
+        self.video_sources_input.textChanged.connect(self.on_video_sources_changed)
+        self.video_sources_list.itemChanged.connect(lambda _: self.schedule_save_config())
+        self.use_selected_only_checkbox.toggled.connect(lambda _: self.schedule_save_config())
+
+        self.classes_input = QTextEdit()
+        self.classes_input.setPlaceholderText("One class per line")
+        self.classes_input.setToolTip("Class filter: keep only these classes.")
+        form.addRow("Classes:", self.classes_input)
+
+        self.raw_stream_folder_input = QLineEdit()
+        self.raw_stream_folder_input.setToolTip("Folder for downloaded VODs.")
+        raw_layout = QHBoxLayout()
+        raw_layout.addWidget(self.raw_stream_folder_input)
+        btn_raw = QPushButton("...")
+        btn_raw.setFixedWidth(32)
+        btn_raw.clicked.connect(lambda: self.browse_folder(self.raw_stream_folder_input))
+        raw_layout.addWidget(btn_raw)
+        form.addRow("Raw stream folder:", raw_layout)
+
+        self.chunks_folder_input = QLineEdit()
+        self.chunks_folder_input.setToolTip("Folder for .ts segments.")
+        chunks_layout = QHBoxLayout()
+        chunks_layout.addWidget(self.chunks_folder_input)
+        btn_chunks = QPushButton("...")
+        btn_chunks.setFixedWidth(32)
+        btn_chunks.clicked.connect(lambda: self.browse_folder(self.chunks_folder_input))
+        chunks_layout.addWidget(btn_chunks)
+        form.addRow("Chunks folder:", chunks_layout)
+
+        self.output_folder_input = QLineEdit()
+        self.output_folder_input.setToolTip("Dataset output folder (images/labels).")
+        out_layout = QHBoxLayout()
+        out_layout.addWidget(self.output_folder_input)
+        btn_out = QPushButton("...")
+        btn_out.setFixedWidth(32)
+        btn_out.clicked.connect(lambda: self.browse_folder(self.output_folder_input))
+        out_layout.addWidget(btn_out)
+        form.addRow("Output folder:", out_layout)
+
+        self.model_path_input = QLineEdit()
+        self.model_path_input.setToolTip("Path to YOLO .pt model for inference.")
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(self.model_path_input)
+        btn_model = QPushButton("...")
+        btn_model.setFixedWidth(32)
+        btn_model.clicked.connect(lambda: self.browse_file(self.model_path_input, "Select Model File", "Model Files (*.pt)"))
+        model_layout.addWidget(btn_model)
+        form.addRow("Model path:", model_layout)
+
+        self.ffmpeg_path_input = QLineEdit()
+        self.ffmpeg_path_input.setToolTip("Path to ffmpeg.exe for slicing.")
+        ffmpeg_layout = QHBoxLayout()
+        ffmpeg_layout.addWidget(self.ffmpeg_path_input)
+        btn_ffmpeg = QPushButton("...")
+        btn_ffmpeg.setFixedWidth(32)
+        btn_ffmpeg.clicked.connect(lambda: self.browse_file(self.ffmpeg_path_input, "Select ffmpeg.exe", "Executables (*.exe);;All Files (*.*)"))
+        ffmpeg_layout.addWidget(btn_ffmpeg)
+        form.addRow("FFmpeg path:", ffmpeg_layout)
+
+        self.cookies_path_input = QLineEdit()
+        self.cookies_path_input.setToolTip("Path to Twitch cookies (if needed).")
+        cookies_layout = QHBoxLayout()
+        cookies_layout.addWidget(self.cookies_path_input)
+        btn_cookies = QPushButton("...")
+        btn_cookies.setFixedWidth(32)
+        btn_cookies.clicked.connect(lambda: self.browse_file(self.cookies_path_input, "Select Cookies File", "All Files (*.*)"))
+        cookies_layout.addWidget(btn_cookies)
+        form.addRow("Cookies path:", cookies_layout)
+
+        self.download_archive_input = QLineEdit()
+        self.download_archive_input.setToolTip("Archive file of downloaded URLs (downloaded.txt).")
+        archive_layout = QHBoxLayout()
+        archive_layout.addWidget(self.download_archive_input)
+        btn_archive = QPushButton("...")
+        btn_archive.setFixedWidth(32)
+        btn_archive.clicked.connect(lambda: self.browse_save_file(self.download_archive_input, "Select download archive", "Text Files (*.txt);;All Files (*.*)"))
+        archive_layout.addWidget(btn_archive)
+        form.addRow("Download archive:", archive_layout)
+
+        self.resume_info_input = QLineEdit()
+        self.resume_info_input.setToolTip("Resume file (resume.json).")
+        resume_layout = QHBoxLayout()
+        resume_layout.addWidget(self.resume_info_input)
+        btn_resume = QPushButton("...")
+        btn_resume.setFixedWidth(32)
+        btn_resume.clicked.connect(lambda: self.browse_save_file(self.resume_info_input, "Select resume file", "JSON Files (*.json);;All Files (*.*)"))
+        resume_layout.addWidget(btn_resume)
+        form.addRow("Resume info file:", resume_layout)
+
+        self.pause_after_download_checkbox = QCheckBox("Pause after download")
+        self.pause_after_download_checkbox.setToolTip("Ask before processing downloaded streams.")
+        self.pause_after_download_checkbox.setChecked(True)
+        form.addRow("", self.pause_after_download_checkbox)
+        self.pause_after_download_checkbox.toggled.connect(lambda _: self.schedule_save_config())
+
+        self.time_interval_input = QSpinBox()
+        self.time_interval_input.setRange(1, 100000)
+        self.time_interval_input.setToolTip("Run inference every Nth frame.")
+
+        self.detection_threshold_input = QDoubleSpinBox()
+        self.detection_threshold_input.setRange(0.0, 1.0)
+        self.detection_threshold_input.setSingleStep(0.05)
+        self.detection_threshold_input.setToolTip("Confidence threshold for saving detections.")
+
+        self.chunks_per_stream_input = QSpinBox()
+        self.chunks_per_stream_input.setRange(1, 10000)
+        self.chunks_per_stream_input.setToolTip("How many parts to split each VOD into.")
+
+        self.max_download_workers_input = QSpinBox()
+        self.max_download_workers_input.setRange(1, 128)
+        self.max_download_workers_input.setToolTip("Parallel download workers (yt-dlp).")
+
+        self.split_workers_input = QSpinBox()
+        self.split_workers_input.setRange(1, 128)
+        self.split_workers_input.setToolTip("Workers for slicing .ts (ffmpeg).")
+
+        self.process_workers_input = QSpinBox()
+        self.process_workers_input.setRange(1, 128)
+        self.process_workers_input.setToolTip("Workers for YOLO inference per chunk.")
+
+        self.save_workers_input = QSpinBox()
+        self.save_workers_input.setRange(1, 128)
+        self.save_workers_input.setToolTip("Workers for saving images/labels to disk.")
+        form.addRow(QLabel("Processing & Workers"))
+
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+
+        lbl_time = QLabel("Time interval:")
+        lbl_time.setToolTip(self.time_interval_input.toolTip())
+        grid.addWidget(lbl_time, 0, 0)
+        grid.addWidget(self.time_interval_input, 0, 1)
+
+        lbl_det = QLabel("Detection threshold:")
+        lbl_det.setToolTip(self.detection_threshold_input.toolTip())
+        grid.addWidget(lbl_det, 0, 2)
+        grid.addWidget(self.detection_threshold_input, 0, 3)
+
+        lbl_chunks = QLabel("Chunks per stream:")
+        lbl_chunks.setToolTip(self.chunks_per_stream_input.toolTip())
+        grid.addWidget(lbl_chunks, 1, 0)
+        grid.addWidget(self.chunks_per_stream_input, 1, 1)
+
+        lbl_dl = QLabel("Download workers:")
+        lbl_dl.setToolTip(self.max_download_workers_input.toolTip())
+        grid.addWidget(lbl_dl, 1, 2)
+        grid.addWidget(self.max_download_workers_input, 1, 3)
+
+        lbl_split = QLabel("Split workers:")
+        lbl_split.setToolTip(self.split_workers_input.toolTip())
+        grid.addWidget(lbl_split, 2, 0)
+        grid.addWidget(self.split_workers_input, 2, 1)
+
+        lbl_proc = QLabel("Process workers:")
+        lbl_proc.setToolTip(self.process_workers_input.toolTip())
+        grid.addWidget(lbl_proc, 2, 2)
+        grid.addWidget(self.process_workers_input, 2, 3)
+
+        lbl_save = QLabel("Save workers:")
+        lbl_save.setToolTip(self.save_workers_input.toolTip())
+        grid.addWidget(lbl_save, 3, 0)
+        grid.addWidget(self.save_workers_input, 3, 1)
+
+        grid_widget = QWidget()
+        grid_widget.setLayout(grid)
+        form.addRow(grid_widget)
+
+        layout.addLayout(form)
+
+        btn_layout = QHBoxLayout()
+        self.btn_save = QPushButton("Save Config")
+        self.btn_save.clicked.connect(self.save_config)
+        self.btn_run = QPushButton("Run StreamCut")
+        self.btn_run.clicked.connect(self.run_streamcut)
+        self.btn_stop = QPushButton("Stop")
+        self.btn_stop.setEnabled(False)
+        self.btn_stop.clicked.connect(self.stop_streamcut)
+        btn_layout.addWidget(self.btn_save)
+        btn_layout.addWidget(self.btn_run)
+        btn_layout.addWidget(self.btn_stop)
+        layout.addLayout(btn_layout)
+
+        self.console = QTextBrowser()
+        self.console.setMinimumHeight(150)
+        layout.addWidget(self.console)
+
+        self.setLayout(layout)
+
+    def log_to_console(self, message):
+        self.console.append(message)
+        self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+
+    def schedule_save_config(self):
+        if self._save_timer:
+            self._save_timer.start(400)
+
+    def on_video_sources_changed(self):
+        self.sync_video_sources_list()
+        self.schedule_save_config()
+
+    def browse_config_path(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select StreamCut config", "", "JSON Files (*.json)")
+        if path:
+            self.config_path_input.setText(path)
+            self.load_config(path)
+
+    def browse_file(self, target_input, title, filter_str):
+        start = target_input.text().strip()
+        path, _ = QFileDialog.getOpenFileName(self, title, start, filter_str)
+        if path:
+            target_input.setText(path)
+
+    def browse_save_file(self, target_input, title, filter_str):
+        start = target_input.text().strip()
+        path, _ = QFileDialog.getSaveFileName(self, title, start, filter_str)
+        if path:
+            target_input.setText(path)
+
+    def browse_folder(self, target_input):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", target_input.text().strip())
+        if folder:
+            target_input.setText(folder)
+
+
+# -------------------- Benchmark Dialog --------------------
+class BenchmarkDialog(QDialog):
+    def __init__(self, log_callback=None, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Benchmark")
+        self.setGeometry(200, 200, 600, 200)
+        self.log_callback = log_callback
+        self.thread = None
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QFormLayout()
+
+        self.models_dir_input = QLineEdit()
+        models_layout = QHBoxLayout()
+        models_layout.addWidget(self.models_dir_input)
+        btn_models = QPushButton("...")
+        btn_models.setFixedWidth(32)
+        btn_models.clicked.connect(lambda: self.browse_folder(self.models_dir_input))
+        models_layout.addWidget(btn_models)
+        layout.addRow("Models dir:", models_layout)
+
+        self.images_dir_input = QLineEdit()
+        images_layout = QHBoxLayout()
+        images_layout.addWidget(self.images_dir_input)
+        btn_images = QPushButton("...")
+        btn_images.setFixedWidth(32)
+        btn_images.clicked.connect(lambda: self.browse_folder(self.images_dir_input))
+        images_layout.addWidget(btn_images)
+        layout.addRow("Images dir:", images_layout)
+
+        btn_layout = QHBoxLayout()
+        self.btn_run = QPushButton("Run Benchmark")
+        self.btn_run.clicked.connect(self.run_benchmark)
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.btn_run)
+        layout.addRow("", btn_layout)
+
+        self.setLayout(layout)
+
+    def browse_folder(self, target_input):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", target_input.text().strip())
+        if folder:
+            target_input.setText(folder)
+
+    def run_benchmark(self):
+        if self.thread and self.thread.isRunning():
+            return
+        models_dir = self.models_dir_input.text().strip() or None
+        images_dir = self.images_dir_input.text().strip() or None
+        self.btn_run.setEnabled(False)
+        self.thread = BenchmarkThread(models_dir=models_dir, images_dir=images_dir)
+        if self.log_callback:
+            self.thread.log_signal.connect(self.log_callback)
+        self.thread.finished.connect(self.on_finished)
+        self.thread.start()
+
+    def on_finished(self, ok):
+        if self.log_callback:
+            self.log_callback("[INFO] Benchmark finished." if ok else "[ERROR] Benchmark failed.")
+        self.btn_run.setEnabled(True)
+
+    def load_config(self, path):
+        try:
+            with open(path, 'r') as f:
+                self.config = json.load(f)
+        except Exception as e:
+            self.config = {}
+            self.log_to_console(f"[ERROR] Failed to load config: {e}")
+
+        self.video_sources_input.setPlainText("\n".join(self.config.get("video_sources", [])))
+        self.classes_input.setPlainText("\n".join(self.config.get("classes", [])))
+        self.use_selected_only_checkbox.setChecked(bool(self.config.get("use_selected_only", True)))
+        self.pause_after_download_checkbox.setChecked(bool(self.config.get("pause_after_download", True)))
+        self.sync_video_sources_list()
+        selected = set(self.config.get("selected_video_sources", []))
+        if selected:
+            for i in range(self.video_sources_list.count()):
+                item = self.video_sources_list.item(i)
+                item.setCheckState(Qt.Checked if item.text() in selected else Qt.Unchecked)
+        self.raw_stream_folder_input.setText(self.config.get("raw_stream_folder", ""))
+        self.chunks_folder_input.setText(self.config.get("chunks_folder", ""))
+        self.output_folder_input.setText(self.config.get("output_folder", ""))
+        self.model_path_input.setText(self.config.get("model_path", ""))
+        self.ffmpeg_path_input.setText(self.config.get("ffmpeg_path", ""))
+        self.cookies_path_input.setText(self.config.get("twitch_cookies_path", ""))
+        self.download_archive_input.setText(self.config.get("download_archive", ""))
+        self.resume_info_input.setText(self.config.get("resume_info_file", ""))
+        self.time_interval_input.setValue(int(self.config.get("time_interval", 1)))
+        self.detection_threshold_input.setValue(float(self.config.get("detection_threshold", 0.5)))
+        self.chunks_per_stream_input.setValue(int(self.config.get("chunks_per_stream", 1)))
+        self.max_download_workers_input.setValue(int(self.config.get("max_download_workers", 1)))
+        self.split_workers_input.setValue(int(self.config.get("split_workers", 1)))
+        self.process_workers_input.setValue(int(self.config.get("process_workers", 1)))
+        self.save_workers_input.setValue(int(self.config.get("save_workers", 1)))
+
+    def update_config_from_fields(self):
+        def to_lines(text):
+            return [line.strip() for line in text.splitlines() if line.strip()]
+
+        self.sync_video_sources_list()
+        all_sources = [self.video_sources_list.item(i).text() for i in range(self.video_sources_list.count())]
+        selected_sources = self.get_checked_sources()
+        self.config["video_sources"] = all_sources or to_lines(self.video_sources_input.toPlainText())
+        self.config["selected_video_sources"] = selected_sources
+        self.config["use_selected_only"] = bool(self.use_selected_only_checkbox.isChecked())
+        self.config["pause_after_download"] = bool(self.pause_after_download_checkbox.isChecked())
+        self.config["classes"] = to_lines(self.classes_input.toPlainText())
+        self.config["raw_stream_folder"] = self.raw_stream_folder_input.text().strip()
+        self.config["chunks_folder"] = self.chunks_folder_input.text().strip()
+        self.config["output_folder"] = self.output_folder_input.text().strip()
+        self.config["model_path"] = self.model_path_input.text().strip()
+        self.config["ffmpeg_path"] = self.ffmpeg_path_input.text().strip()
+        self.config["twitch_cookies_path"] = self.cookies_path_input.text().strip()
+        self.config["download_archive"] = self.download_archive_input.text().strip()
+        self.config["resume_info_file"] = self.resume_info_input.text().strip()
+        self.config["time_interval"] = int(self.time_interval_input.value())
+        self.config["detection_threshold"] = float(self.detection_threshold_input.value())
+        self.config["chunks_per_stream"] = int(self.chunks_per_stream_input.value())
+        self.config["max_download_workers"] = int(self.max_download_workers_input.value())
+        self.config["split_workers"] = int(self.split_workers_input.value())
+        self.config["process_workers"] = int(self.process_workers_input.value())
+        self.config["save_workers"] = int(self.save_workers_input.value())
+
+    def sync_video_sources_list(self):
+        text_sources = [line.strip() for line in self.video_sources_input.toPlainText().splitlines() if line.strip()]
+        existing_states = {self.video_sources_list.item(i).text(): self.video_sources_list.item(i).checkState()
+                           for i in range(self.video_sources_list.count())}
+        self.video_sources_list.clear()
+        for source in text_sources:
+            item = QListWidgetItem(source)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setCheckState(existing_states.get(source, Qt.Checked))
+            self.video_sources_list.addItem(item)
+
+    def set_sources_check_state(self, state):
+        for i in range(self.video_sources_list.count()):
+            self.video_sources_list.item(i).setCheckState(state)
+
+    def get_checked_sources(self):
+        sources = []
+        for i in range(self.video_sources_list.count()):
+            item = self.video_sources_list.item(i)
+            if item.checkState() == Qt.Checked:
+                sources.append(item.text())
+        return sources
+
+    def save_config(self):
+        path = self.config_path_input.text().strip()
+        if not path:
+            self.log_to_console("[ERROR] Config path is empty.")
+            return
+
+        self.update_config_from_fields()
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            with open(path, 'w') as f:
+                json.dump(self.config, f, indent=4)
+            self.log_to_console("[INFO] Config saved.")
+        except Exception as e:
+            self.log_to_console(f"[ERROR] Failed to save config: {e}")
+
+    def run_streamcut(self):
+        if self.stream_thread and self.stream_thread.isRunning():
+            self.log_to_console("[INFO] StreamCut is already running.")
+            return
+
+        self.save_config()
+        config_path = self.config_path_input.text().strip()
+        if not config_path:
+            return
+
+        self._download_start_ts = time.time()
+        self.btn_run.setEnabled(False)
+        self.btn_run.setText("Running...")
+        self.btn_stop.setEnabled(True)
+        pause_after = bool(self.pause_after_download_checkbox.isChecked())
+        self._stream_mode = "download_only" if pause_after else "all"
+        self.stream_thread = StreamCutThread(config_path, mode=self._stream_mode)
+        self.stream_thread.log_signal.connect(self.log_to_console)
+        self.stream_thread.download_info_signal.connect(self.on_download_info)
+        self.stream_thread.download_progress_signal.connect(self.on_download_progress)
+        self.stream_thread.finished.connect(self.on_streamcut_finished)
+        self.stream_thread.start()
+
+        if self._stream_mode in ("download_only", "all"):
+            self.download_dialog = self.create_download_dialog()
+            self.download_dialog.show()
+
+    def stop_streamcut(self):
+        if self.stream_thread and self.stream_thread.isRunning():
+            self.log_to_console("[INFO] Stop requested. Waiting for current task...")
+            self.stream_thread.request_stop()
+            self.btn_stop.setEnabled(False)
+        else:
+            self.btn_stop.setEnabled(False)
+
+    def on_streamcut_finished(self, success):
+        if not success:
+            self.log_to_console("[ERROR] StreamCut stopped with errors.")
+            self.btn_run.setEnabled(True)
+            self.btn_run.setText("Run StreamCut")
+            self.btn_stop.setEnabled(False)
+            if hasattr(self, "download_dialog"):
+                self.download_dialog.close()
+            return
+
+        if self._stream_mode == "download_only":
+            self.log_to_console("[INFO] Download complete. Waiting for confirmation…")
+            self.show_download_sizes()
+            self.btn_stop.setEnabled(False)
+            reply = QMessageBox.question(
+                self,
+                "Continue processing?",
+                "Downloads finished. Continue with splitting and inference?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes
+            )
+            if reply == QMessageBox.Yes:
+                self.log_to_console("[INFO] продолжaем обработку…")
+                self._stream_mode = "process_only"
+                config_path = self.config_path_input.text().strip()
+                self.stream_thread = StreamCutThread(config_path, mode="process_only")
+                self.stream_thread.log_signal.connect(self.log_to_console)
+                self.stream_thread.finished.connect(self.on_streamcut_finished)
+                self.btn_stop.setEnabled(True)
+                self.stream_thread.start()
+                return
+            else:
+                self.log_to_console("[INFO] Processing cancelled by user.")
+        else:
+            self.log_to_console("[INFO] StreamCut finished.")
+
+        self.btn_run.setEnabled(True)
+        self.btn_run.setText("Run StreamCut")
+        self.btn_stop.setEnabled(False)
+        if hasattr(self, "download_dialog"):
+            self.download_dialog.close()
+
+    def on_download_info(self, info):
+        if not hasattr(self, "download_dialog"):
+            return
+        title = info.get("title", "-")
+        size = self.format_size(info.get("size_bytes"))
+        self.download_dialog.title_label.setText(title)
+        self.download_dialog.size_label.setText(size)
+
+    def on_download_progress(self, info):
+        if not hasattr(self, "download_dialog"):
+            return
+        downloaded = self.format_size(info.get("downloaded_bytes"))
+        total = self.format_size(info.get("total_bytes"))
+        speed = self.format_size(info.get("speed_bytes")) + "/s" if info.get("speed_bytes") else "-"
+        eta = info.get("eta")
+        if eta is None:
+            eta_str = "-"
+        else:
+            mins, secs = divmod(int(eta), 60)
+            eta_str = f"{mins:02d}:{secs:02d}"
+        percent = int(info.get("percent", 0))
+        self.download_dialog.downloaded_label.setText(f"{downloaded} / {total}")
+        self.download_dialog.speed_label.setText(speed)
+        self.download_dialog.eta_label.setText(eta_str)
+        self.download_dialog.progress_bar.setValue(percent)
+
+    def show_download_sizes(self):
+        raw_folder = self.raw_stream_folder_input.text().strip()
+        if not raw_folder or not os.path.isdir(raw_folder):
+            return
+        start_ts = getattr(self, "_download_start_ts", None)
+        if start_ts is None:
+            return
+
+        files = []
+        for p in Path(raw_folder).glob("*.*"):
+            try:
+                if p.stat().st_mtime >= start_ts - 2:
+                    files.append(p)
+            except Exception:
+                continue
+
+        if not files:
+            return
+
+        def fmt_size(num):
+            for unit in ["B", "KB", "MB", "GB", "TB"]:
+                if num < 1024.0:
+                    return f"{num:.2f} {unit}"
+                num /= 1024.0
+            return f"{num:.2f} PB"
+
+        lines = []
+        for f in sorted(files):
+            try:
+                size = fmt_size(f.stat().st_size)
+            except Exception:
+                size = "unknown"
+            lines.append(f"{f.name} — {size}")
+
+        QMessageBox.information(
+            self,
+            "Downloaded files",
+            "Downloaded streams:\n\n" + "\n".join(lines)
+        )
+
+    @staticmethod
+    def format_size(num):
+        if num is None:
+            return "-"
+        try:
+            num = float(num)
+        except Exception:
+            return "-"
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if num < 1024.0:
+                return f"{num:.2f} {unit}"
+            num /= 1024.0
+        return f"{num:.2f} PB"
+
 # -------------------- Config Dialog --------------------
 class ConfigDialog(QDialog):
-    def __init__(self, config):
+    def __init__(self, config, config_path):
         super().__init__()
         self.setWindowTitle("Configuration Settings")
         self.setGeometry(200, 200, 400, 400)
         self.config = config
+        self.config_path = Path(config_path)
         self.init_ui()
 
     def init_ui(self):
@@ -86,57 +797,75 @@ class ConfigDialog(QDialog):
         self.preview_label = QLabel()
         self.preview_label.setFixedSize(640, 640)
         self.preview_label.setStyleSheet("border: 1px solid #888; background-color: #111;")
+        self.preview_label.setToolTip("Preview of capture area during data collection.")
         layout.addWidget(self.preview_label)
 
         # model path
         self.model_path_input = QLineEdit(self.config.get("model_path", ""))
-        layout.addRow("Model Path:", self.model_path_input)
-        btn_model = QPushButton("Browse Model…")
+        self.model_path_input.setToolTip("Path to YOLO .pt model for detection.")
+        model_layout = QHBoxLayout()
+        model_layout.addWidget(self.model_path_input)
+        btn_model = QPushButton("...")
+        btn_model.setFixedWidth(32)
         btn_model.clicked.connect(self.browse_model_path)
-        layout.addWidget(btn_model)
+        model_layout.addWidget(btn_model)
+        layout.addRow("Model Path:", model_layout)
 
         # grabber settings
         self.crop_size_input = QDoubleSpinBox()
         self.crop_size_input.setSingleStep(0.01)
         self.crop_size_input.setRange(0.0, 1.0)
         self.crop_size_input.setValue(self.config.get("grabber", {}).get("crop_size", 0.8))
+        self.crop_size_input.setToolTip("Central crop size (0..1) for capture.")
         layout.addRow("Crop Size:", self.crop_size_input)
 
         self.width_input = QSpinBox()
         self.width_input.setRange(1, 3840)
         self.width_input.setSingleStep(1)
         self.width_input.setValue(self.config.get("grabber", {}).get("width", 640))
+        self.width_input.setToolTip("Capture size in pixels.")
         layout.addRow("Width:", self.width_input)
 
         self.height_input = QSpinBox()
         self.height_input.setRange(1, 2160)
         self.height_input.setSingleStep(1)
         self.height_input.setValue(self.config.get("grabber", {}).get("height", 640))
+        self.height_input.setToolTip("Capture size in pixels.")
         layout.addRow("Height:", self.height_input)
 
         # output folder
         self.output_folder_input = QLineEdit(self.config.get("output_folder", ""))
-        layout.addRow("Output Folder:", self.output_folder_input)
-        btn_out = QPushButton("Browse Output…")
+        self.output_folder_input.setToolTip("Folder for saving images/labels during capture.")
+        out_layout = QHBoxLayout()
+        out_layout.addWidget(self.output_folder_input)
+        btn_out = QPushButton("...")
+        btn_out.setFixedWidth(32)
         btn_out.clicked.connect(self.browse_output_folder)
-        layout.addWidget(btn_out)
+        out_layout.addWidget(btn_out)
+        layout.addRow("Output Folder:", out_layout)
 
         # save interval
         self.save_interval_input = QSpinBox()
         self.save_interval_input.setValue(self.config.get("save_interval", 3))
+        self.save_interval_input.setToolTip("Min interval between saves (seconds).")
         layout.addRow("Save Interval:", self.save_interval_input)
 
         # detection threshold
         self.detection_threshold_input = QDoubleSpinBox()
         self.detection_threshold_input.setValue(self.config.get("detection_threshold", 0.5))
+        self.detection_threshold_input.setToolTip("Confidence threshold for saving detections.")
         layout.addRow("Detection Threshold:", self.detection_threshold_input)
 
         # data folder
         self.data_folder_input = QLineEdit(self.config.get("data_folder", ""))
-        layout.addRow("Data Folder:", self.data_folder_input)
-        btn_data = QPushButton("Browse Data…")
+        self.data_folder_input.setToolTip("Dataset folder with images/labels for split/labeling.")
+        data_layout = QHBoxLayout()
+        data_layout.addWidget(self.data_folder_input)
+        btn_data = QPushButton("...")
+        btn_data.setFixedWidth(32)
         btn_data.clicked.connect(self.browse_data_folder)
-        layout.addWidget(btn_data)
+        data_layout.addWidget(btn_data)
+        layout.addRow("Data Folder:", data_layout)
 
         # save button
         btn_save = QPushButton("Save")
@@ -173,7 +902,8 @@ class ConfigDialog(QDialog):
         self.config["detection_threshold"] = self.detection_threshold_input.value()
         self.config["data_folder"] = self.data_folder_input.text()
         try:
-            with open('config.json', 'w') as f:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=4)
             self.accept()
         except Exception as e:
@@ -188,13 +918,15 @@ class YOLOApp(QWidget):
         self.setGeometry(100, 100, 800, 500)
 
         # state
-        self.config = self.load_config("config.json")
+        self.config_path = Path(__file__).resolve().parent / "configs" / "config.json"
+        self.config = self.load_config(self.config_path)
         self.capture = None
         self.capture_thread = None
 
         self.training_active = False
         self.data_collection_active = False
 
+        self.apply_ui_font(self.config.get("ui", {}).get("font_size", 11))
         self.init_ui()
 
     # -------- Config I/O ----------
@@ -207,7 +939,8 @@ class YOLOApp(QWidget):
 
     def save_config(self):
         try:
-            with open('config.json', 'w') as f:
+            self.config_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.config_path, 'w') as f:
                 json.dump(self.config, f, indent=4)
             self.console.append("Configuration saved.")
         except Exception as e:
@@ -217,120 +950,53 @@ class YOLOApp(QWidget):
     def init_ui(self):
         layout = QVBoxLayout()
 
-        # classes controls
-        layout.addWidget(QLabel("Select classes:"))
-        self.class_input = QLineEdit()
-        self.class_input.setPlaceholderText("Enter class name")
-        layout.addWidget(self.class_input)
+        self.tabs = QTabWidget()
+        self.tab_dataset = QWidget()
+        self.tab_training = QWidget()
+        self.tab_tools = QWidget()
 
-        btn_add = QPushButton("Add Class")
-        btn_add.clicked.connect(self.add_class)
-        layout.addWidget(btn_add)
+        self.init_dataset_tab()
+        self.init_training_tab()
+        self.init_tools_tab()
 
-        btn_rem = QPushButton("Remove Class")
-        btn_rem.clicked.connect(self.remove_class)
-        layout.addWidget(btn_rem)
+        self.tabs.addTab(self.tab_dataset, "Dataset")
+        self.tabs.addTab(self.tab_training, "Training")
+        self.tabs.addTab(self.tab_tools, "Tools")
 
-        splitter = QSplitter(Qt.Vertical)
-
-        self.class_list = QListWidget()
-        self.class_list.setMinimumHeight(80)
-        self.class_list.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
-        splitter.addWidget(self.class_list)
-        self.update_class_list()
+        font_widget = QWidget()
+        font_layout = QHBoxLayout()
+        font_layout.setContentsMargins(0, 0, 0, 0)
+        font_layout.setSpacing(6)
+        font_label = QLabel("Font")
+        self.font_size_input = QSpinBox()
+        self.font_size_input.setRange(8, 24)
+        self.font_size_input.setValue(int(self.config.get("ui", {}).get("font_size", 11)))
+        self.font_size_input.setToolTip("Adjust application font size.")
+        self.font_size_input.valueChanged.connect(self.on_font_size_changed)
+        font_layout.addWidget(font_label)
+        font_layout.addWidget(self.font_size_input)
+        font_widget.setLayout(font_layout)
+        self.tabs.setCornerWidget(font_widget, Qt.TopRightCorner)
 
         self.console = QTextBrowser()
-        self.console.setMinimumHeight(100)
+        self.console.setMinimumHeight(140)
         self.console.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        self.console.setToolTip("Real-time logs for collection and training.")
+        self.console.installEventFilter(self)
+
+        self.console_clear_btn = QPushButton("Clear", self.console)
+        self.console_clear_btn.setToolTip("Clear console output.")
+        self.console_clear_btn.setFixedHeight(24)
+        self.console_clear_btn.clicked.connect(self.console.clear)
+        self.position_console_button()
+
+        splitter = QSplitter(Qt.Vertical)
+        splitter.addWidget(self.tabs)
         splitter.addWidget(self.console)
+        splitter.setSizes([600, 200])
 
-        splitter.setSizes([200, 300])
         layout.addWidget(splitter)
-
-        # data collection toggle
-        self.btn_data_toggle = QPushButton("Start Data Collection")
-        self.btn_data_toggle.clicked.connect(self.toggle_data_collection)
-        layout.addWidget(self.btn_data_toggle)
-
-        # misc buttons
-        btn_split = QPushButton("Split Dataset")
-        btn_split.clicked.connect(self.split_dataset)
-        layout.addWidget(btn_split)
-
-        btn_show_classes = QPushButton("Show Classes from Model")
-        btn_show_classes.clicked.connect(self.show_model_classes)
-        layout.addWidget(btn_show_classes)
-
-        # training params
-        grp = QGroupBox("Train YOLO Parameters")
-        form = QFormLayout()
-        data_layout = QHBoxLayout()
-
-        self.data_yaml_input = QLineEdit()
-        last_yaml = self.config.get("last_data_yaml", "")
-        self.data_yaml_input.setText(last_yaml)
-        btn_browse_yaml = QPushButton("Browse…")
-        btn_browse_yaml.clicked.connect(self.browse_yaml_file)
-        data_layout.addWidget(self.data_yaml_input)
-        data_layout.addWidget(btn_browse_yaml)
-        form.addRow("Data yaml:", data_layout)
-
-        td = self.config.get("train_defaults", {})
-
-        self.epochs_input = QSpinBox()
-        self.epochs_input.setRange(1, 100000)
-        self.epochs_input.setValue(int(td.get("epochs", 50)))
-        form.addRow("Epochs:", self.epochs_input)
-
-        self.imgsz_input = QSpinBox()
-        self.imgsz_input.setRange(32, 4096)
-        self.imgsz_input.setSingleStep(32)
-        self.imgsz_input.setValue(int(td.get("imgsz", 640)))
-        form.addRow("Imgsz:", self.imgsz_input)
-
-        self.batch_input = QSpinBox()
-        self.batch_input.setRange(1, 4096)
-        self.batch_input.setValue(int(td.get("batch", 16)))
-        form.addRow("Batch:", self.batch_input)
-
-        self.project_name_input = QLineEdit()
-        self.project_name_input.setText(td.get("project_name", ""))
-        form.addRow("Project Name:", self.project_name_input)
-
-        self.continue_checkbox = QCheckBox("Continue Training (resume)")
-        self.continue_checkbox.setChecked(bool(td.get("resume", False)))
-        form.addRow("", self.continue_checkbox)
-
-        self.exist_ok_checkbox = QCheckBox("Overwrite run folder if exists (exist_ok)")
-        self.exist_ok_checkbox.setChecked(bool(td.get("exist_ok", True)))
-        form.addRow("", self.exist_ok_checkbox)
-
-        self.save_period_input = QSpinBox()
-        self.save_period_input.setRange(0, 200)
-        self.save_period_input.setValue(int(td.get("save_period", 100)))
-        form.addRow("Save period (epochs):", self.save_period_input)
-
-        self.patience_input = QSpinBox()
-        self.patience_input.setRange(0, 100)
-        self.patience_input.setValue(int(td.get("patience", 20)))
-        form.addRow("Early stopping patience %:", self.patience_input)
-
-        grp.setLayout(form)
-        layout.addWidget(grp)
-
-        # training toggle
-        self.btn_train_toggle = QPushButton("Start Training")
-        self.btn_train_toggle.clicked.connect(self.toggle_training)
-        layout.addWidget(self.btn_train_toggle)
-
-        # config management
-        btn_cfg = QPushButton("Config Settings")
-        btn_cfg.clicked.connect(self.open_config_dialog)
-        layout.addWidget(btn_cfg)
-
-        self.btn_def = QPushButton("Restore Default Config")
-        self.btn_def.clicked.connect(self.restore_default_config)
-        layout.addWidget(self.btn_def)
+        self.setLayout(layout)
 
         # connect autosave
         self.data_yaml_input.editingFinished.connect(self.persist_train_params)
@@ -342,13 +1008,429 @@ class YOLOApp(QWidget):
         self.exist_ok_checkbox.toggled.connect(lambda _: self.persist_train_params())
         self.save_period_input.valueChanged.connect(lambda _: self.persist_train_params())
         self.patience_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.lr0_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.optimizer_input.textEdited.connect(lambda _: self.persist_train_params())
+        self.mosaic_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.mixup_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.copy_paste_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.hsv_h_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.hsv_s_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.hsv_v_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.fliplr_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.flipud_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.scale_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.translate_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.shear_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.erasing_input.valueChanged.connect(lambda _: self.persist_train_params())
+        self.amp_checkbox.toggled.connect(lambda _: self.persist_train_params())
+        self.plots_checkbox.toggled.connect(lambda _: self.persist_train_params())
+        self.save_json_checkbox.toggled.connect(lambda _: self.persist_train_params())
 
-        self.setLayout(layout)
+    def init_dataset_tab(self):
+        layout = QHBoxLayout()
+
+        left_col = QVBoxLayout()
+        class_group = QGroupBox("Classes")
+        class_layout = QVBoxLayout()
+        self.class_input = QLineEdit()
+        self.class_input.setPlaceholderText("Enter class name")
+        self.class_input.setToolTip("Add a class name to collect/label.")
+        class_layout.addWidget(self.class_input)
+
+        btn_row = QHBoxLayout()
+        btn_add = QPushButton("Add")
+        btn_add.setToolTip("Add class to list.")
+        btn_add.clicked.connect(self.add_class)
+        btn_rem = QPushButton("Remove")
+        btn_rem.setToolTip("Remove selected class.")
+        btn_rem.clicked.connect(self.remove_class)
+        btn_row.addWidget(btn_add)
+        btn_row.addWidget(btn_rem)
+        class_layout.addLayout(btn_row)
+
+        self.class_list = QListWidget()
+        self.class_list.setMinimumHeight(140)
+        self.class_list.setToolTip("Classes used for collection/labeling.")
+        class_layout.addWidget(self.class_list)
+        class_group.setLayout(class_layout)
+        self.update_class_list()
+
+        capture_group = QGroupBox("Capture")
+        capture_layout = QVBoxLayout()
+        self.btn_data_toggle = QPushButton("Start Data Collection")
+        self.btn_data_toggle.setToolTip(
+            "Start/stop semi-auto data collection from the screen."
+        )
+        self.btn_data_toggle.clicked.connect(self.toggle_data_collection)
+        capture_layout.addWidget(self.btn_data_toggle)
+        capture_group.setLayout(capture_layout)
+
+        left_col.addWidget(class_group)
+        left_col.addWidget(capture_group)
+        left_col.addStretch()
+
+        left_widget = QWidget()
+        left_widget.setLayout(left_col)
+
+        preview_group = QGroupBox("Preview")
+        preview_layout = QVBoxLayout()
+        self.preview_label = QLabel("No preview")
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        self.preview_label.setFixedSize(280, 280)
+        self.preview_label.setStyleSheet("border: 1px solid #555; background-color: #111;")
+        self.preview_label.setToolTip("Live frame preview during collection.")
+        preview_layout.addWidget(self.preview_label, alignment=Qt.AlignCenter)
+        preview_group.setLayout(preview_layout)
+        preview_group.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+        layout.addWidget(left_widget, 1)
+        layout.addWidget(preview_group, 0)
+        layout.setAlignment(left_widget, Qt.AlignTop)
+        layout.setAlignment(preview_group, Qt.AlignTop)
+        self.tab_dataset.setLayout(layout)
+
+    def init_training_tab(self):
+        layout = QVBoxLayout()
+
+        data_layout = QHBoxLayout()
+        self.data_yaml_input = QLineEdit()
+        self.data_yaml_input.setToolTip("Path to data.yaml (train/val).")
+        last_yaml = self.config.get("last_data_yaml", "")
+        self.data_yaml_input.setText(last_yaml)
+        btn_browse_yaml = QPushButton("Browse...")
+        btn_browse_yaml.setToolTip("Browse for data.yaml.")
+        btn_browse_yaml.clicked.connect(self.browse_yaml_file)
+        data_layout.addWidget(QLabel("Data yaml:"))
+        data_layout.addWidget(self.data_yaml_input)
+        data_layout.addWidget(btn_browse_yaml)
+        layout.addLayout(data_layout)
+
+        grp = QGroupBox("Train YOLO Parameters")
+        form = QGridLayout()
+        form.setHorizontalSpacing(16)
+        td = self.config.get("train_defaults", {})
+
+        self.epochs_input = QSpinBox()
+        self.epochs_input.setRange(1, 100000)
+        self.epochs_input.setValue(int(td.get("epochs", 50)))
+        self.epochs_input.setToolTip("Number of training epochs.")
+        form.addWidget(QLabel("Epochs:"), 0, 0)
+        form.addWidget(self.epochs_input, 0, 1)
+
+        self.imgsz_input = QSpinBox()
+        self.imgsz_input.setRange(32, 4096)
+        self.imgsz_input.setSingleStep(32)
+        self.imgsz_input.setValue(int(td.get("imgsz", 640)))
+        self.imgsz_input.setToolTip("Image size (imgsz) for training.")
+        form.addWidget(QLabel("Imgsz:"), 0, 2)
+        form.addWidget(self.imgsz_input, 0, 3)
+
+        self.batch_input = QSpinBox()
+        self.batch_input.setRange(1, 4096)
+        self.batch_input.setValue(int(td.get("batch", 16)))
+        self.batch_input.setToolTip("Batch size for training.")
+        form.addWidget(QLabel("Batch:"), 1, 0)
+        form.addWidget(self.batch_input, 1, 1)
+
+        self.project_name_input = QLineEdit()
+        self.project_name_input.setText(td.get("project_name", ""))
+        self.project_name_input.setToolTip("Project/name for outputs (runs/... ).")
+        form.addWidget(QLabel("Project Name:"), 1, 2)
+        form.addWidget(self.project_name_input, 1, 3)
+
+        self.continue_checkbox = QCheckBox("Continue Training (resume)")
+        self.continue_checkbox.setChecked(bool(td.get("resume", False)))
+        self.continue_checkbox.setToolTip("Resume training from last checkpoint.")
+        form.addWidget(self.continue_checkbox, 2, 0, 1, 2)
+
+        self.exist_ok_checkbox = QCheckBox("Overwrite run folder if exists (exist_ok)")
+        self.exist_ok_checkbox.setChecked(bool(td.get("exist_ok", True)))
+        self.exist_ok_checkbox.setToolTip("Allow overwriting existing run folder.")
+        form.addWidget(self.exist_ok_checkbox, 2, 2, 1, 2)
+
+        self.save_period_input = QSpinBox()
+        self.save_period_input.setRange(0, 200)
+        self.save_period_input.setValue(int(td.get("save_period", 100)))
+        self.save_period_input.setToolTip("Save weights every N epochs (0 = best only).")
+        form.addWidget(QLabel("Save period:"), 3, 0)
+        form.addWidget(self.save_period_input, 3, 1)
+
+        self.patience_input = QSpinBox()
+        self.patience_input.setRange(0, 100)
+        self.patience_input.setValue(int(td.get("patience", 20)))
+        self.patience_input.setToolTip("Early stopping patience (epochs).")
+        form.addWidget(QLabel("Patience:"), 3, 2)
+        form.addWidget(self.patience_input, 3, 3)
+
+        grp.setLayout(form)
+        layout.addWidget(grp)
+
+        adv = QGroupBox("Advanced")
+        adv_form = QGridLayout()
+        adv_form.setHorizontalSpacing(16)
+
+        self.lr0_input = QDoubleSpinBox()
+        self.lr0_input.setRange(0.000001, 1.0)
+        self.lr0_input.setDecimals(6)
+        self.lr0_input.setSingleStep(0.0001)
+        self.lr0_input.setValue(float(td.get("lr0", 0.001)))
+        self.lr0_input.setToolTip("Base learning rate (lr0).")
+
+        self.optimizer_input = QLineEdit()
+        self.optimizer_input.setText(td.get("optimizer", "SGD"))
+        self.optimizer_input.setToolTip("Optimizer name (e.g., SGD, AdamW).")
+
+        self.mosaic_input = QDoubleSpinBox()
+        self.mosaic_input.setRange(0.0, 1.0)
+        self.mosaic_input.setSingleStep(0.05)
+        self.mosaic_input.setValue(float(td.get("mosaic", 1.0)))
+        self.mosaic_input.setToolTip("Mosaic augmentation probability.")
+
+        self.mixup_input = QDoubleSpinBox()
+        self.mixup_input.setRange(0.0, 1.0)
+        self.mixup_input.setSingleStep(0.05)
+        self.mixup_input.setValue(float(td.get("mixup", 0.1)))
+        self.mixup_input.setToolTip("MixUp augmentation probability.")
+
+        self.copy_paste_input = QDoubleSpinBox()
+        self.copy_paste_input.setRange(0.0, 1.0)
+        self.copy_paste_input.setSingleStep(0.05)
+        self.copy_paste_input.setValue(float(td.get("copy_paste", 0.05)))
+        self.copy_paste_input.setToolTip("Copy-paste augmentation probability.")
+
+        self.hsv_h_input = QDoubleSpinBox()
+        self.hsv_h_input.setRange(0.0, 1.0)
+        self.hsv_h_input.setSingleStep(0.01)
+        self.hsv_h_input.setValue(float(td.get("hsv_h", 0.02)))
+        self.hsv_h_input.setToolTip("HSV hue augmentation.")
+
+        self.hsv_s_input = QDoubleSpinBox()
+        self.hsv_s_input.setRange(0.0, 1.0)
+        self.hsv_s_input.setSingleStep(0.05)
+        self.hsv_s_input.setValue(float(td.get("hsv_s", 0.7)))
+        self.hsv_s_input.setToolTip("HSV saturation augmentation.")
+
+        self.hsv_v_input = QDoubleSpinBox()
+        self.hsv_v_input.setRange(0.0, 1.0)
+        self.hsv_v_input.setSingleStep(0.05)
+        self.hsv_v_input.setValue(float(td.get("hsv_v", 0.5)))
+        self.hsv_v_input.setToolTip("HSV value augmentation.")
+
+        self.fliplr_input = QDoubleSpinBox()
+        self.fliplr_input.setRange(0.0, 1.0)
+        self.fliplr_input.setSingleStep(0.05)
+        self.fliplr_input.setValue(float(td.get("fliplr", 0.5)))
+        self.fliplr_input.setToolTip("Horizontal flip probability.")
+
+        self.flipud_input = QDoubleSpinBox()
+        self.flipud_input.setRange(0.0, 1.0)
+        self.flipud_input.setSingleStep(0.05)
+        self.flipud_input.setValue(float(td.get("flipud", 0.0)))
+        self.flipud_input.setToolTip("Vertical flip probability.")
+
+        self.scale_input = QDoubleSpinBox()
+        self.scale_input.setRange(0.0, 2.0)
+        self.scale_input.setSingleStep(0.05)
+        self.scale_input.setValue(float(td.get("scale", 0.6)))
+        self.scale_input.setToolTip("Scale augmentation.")
+
+        self.translate_input = QDoubleSpinBox()
+        self.translate_input.setRange(0.0, 1.0)
+        self.translate_input.setSingleStep(0.05)
+        self.translate_input.setValue(float(td.get("translate", 0.2)))
+        self.translate_input.setToolTip("Translate augmentation.")
+
+        self.shear_input = QDoubleSpinBox()
+        self.shear_input.setRange(0.0, 1.0)
+        self.shear_input.setSingleStep(0.05)
+        self.shear_input.setValue(float(td.get("shear", 0.1)))
+        self.shear_input.setToolTip("Shear augmentation.")
+
+        self.erasing_input = QDoubleSpinBox()
+        self.erasing_input.setRange(0.0, 1.0)
+        self.erasing_input.setSingleStep(0.05)
+        self.erasing_input.setValue(float(td.get("erasing", 0.3)))
+        self.erasing_input.setToolTip("Random erasing probability.")
+
+        self.amp_checkbox = QCheckBox("AMP")
+        self.amp_checkbox.setChecked(bool(td.get("amp", True)))
+        self.amp_checkbox.setToolTip("Enable automatic mixed precision.")
+
+        self.plots_checkbox = QCheckBox("Plots")
+        self.plots_checkbox.setChecked(bool(td.get("plots", True)))
+        self.plots_checkbox.setToolTip("Save training plots.")
+
+        self.save_json_checkbox = QCheckBox("Save JSON")
+        self.save_json_checkbox.setChecked(bool(td.get("save_json", True)))
+        self.save_json_checkbox.setToolTip("Save COCO JSON metrics.")
+
+        adv_form.addWidget(QLabel("lr0:"), 0, 0)
+        adv_form.addWidget(self.lr0_input, 0, 1)
+        adv_form.addWidget(QLabel("Optimizer:"), 0, 2)
+        adv_form.addWidget(self.optimizer_input, 0, 3)
+
+        adv_form.addWidget(QLabel("Mosaic:"), 1, 0)
+        adv_form.addWidget(self.mosaic_input, 1, 1)
+        adv_form.addWidget(QLabel("MixUp:"), 1, 2)
+        adv_form.addWidget(self.mixup_input, 1, 3)
+
+        adv_form.addWidget(QLabel("Copy-paste:"), 2, 0)
+        adv_form.addWidget(self.copy_paste_input, 2, 1)
+        adv_form.addWidget(QLabel("Scale:"), 2, 2)
+        adv_form.addWidget(self.scale_input, 2, 3)
+
+        adv_form.addWidget(QLabel("Translate:"), 3, 0)
+        adv_form.addWidget(self.translate_input, 3, 1)
+        adv_form.addWidget(QLabel("Shear:"), 3, 2)
+        adv_form.addWidget(self.shear_input, 3, 3)
+
+        adv_form.addWidget(QLabel("HSV H:"), 4, 0)
+        adv_form.addWidget(self.hsv_h_input, 4, 1)
+        adv_form.addWidget(QLabel("HSV S:"), 4, 2)
+        adv_form.addWidget(self.hsv_s_input, 4, 3)
+
+        adv_form.addWidget(QLabel("HSV V:"), 5, 0)
+        adv_form.addWidget(self.hsv_v_input, 5, 1)
+        adv_form.addWidget(QLabel("Flip LR:"), 5, 2)
+        adv_form.addWidget(self.fliplr_input, 5, 3)
+
+        adv_form.addWidget(QLabel("Flip UD:"), 6, 0)
+        adv_form.addWidget(self.flipud_input, 6, 1)
+        adv_form.addWidget(QLabel("Erasing:"), 6, 2)
+        adv_form.addWidget(self.erasing_input, 6, 3)
+
+        adv_form.addWidget(self.amp_checkbox, 7, 0)
+        adv_form.addWidget(self.plots_checkbox, 7, 1)
+        adv_form.addWidget(self.save_json_checkbox, 7, 2)
+
+        adv.setLayout(adv_form)
+        layout.addWidget(adv)
+
+        self.btn_train_toggle = QPushButton("Start Training")
+        self.btn_train_toggle.setToolTip("Start/stop YOLO training.")
+        self.btn_train_toggle.clicked.connect(self.toggle_training)
+        layout.addWidget(self.btn_train_toggle)
+        layout.addStretch()
+
+        self.tab_training.setLayout(layout)
+
+    def init_tools_tab(self):
+        layout = QGridLayout()
+        layout.setHorizontalSpacing(8)
+        layout.setVerticalSpacing(8)
+        layout.setContentsMargins(0, 0, 0, 0)
+
+        btn_split = QPushButton("Split Dataset")
+        btn_split.setToolTip("Split dataset into train/val/test.")
+        btn_split.clicked.connect(self.split_dataset)
+        layout.addWidget(btn_split, 0, 0)
+
+        btn_show_classes = QPushButton("Show Classes from Model")
+        btn_show_classes.setToolTip("Show classes from current model.")
+        btn_show_classes.clicked.connect(self.show_model_classes)
+        layout.addWidget(btn_show_classes, 0, 1)
+
+        btn_streamcut = QPushButton("Open StreamCut")
+        btn_streamcut.setToolTip("Open StreamCut for VOD download/slicing.")
+        btn_streamcut.clicked.connect(self.open_streamcut_dialog)
+        layout.addWidget(btn_streamcut, 1, 0)
+
+        btn_benchmark = QPushButton("Benchmark")
+        btn_benchmark.setToolTip("Run ONNX benchmark (onnxruntime required).")
+        btn_benchmark.clicked.connect(self.open_benchmark_dialog)
+        layout.addWidget(btn_benchmark, 1, 1)
+
+        btn_cfg = QPushButton("Config Settings")
+        btn_cfg.setToolTip("Open config settings.")
+        btn_cfg.clicked.connect(self.open_config_dialog)
+        layout.addWidget(btn_cfg, 2, 0)
+
+        self.btn_def = QPushButton("Restore Default Config")
+        self.btn_def.setToolTip("Restore default configuration.")
+        self.btn_def.clicked.connect(self.restore_default_config)
+        layout.addWidget(self.btn_def, 2, 1)
+
+        theme_group = QGroupBox("Theme")
+        theme_layout = QFormLayout()
+        self.theme_combo = QComboBox()
+        self.theme_combo.setToolTip("Switch qt-material theme.")
+        themes = self.get_material_themes()
+        if themes:
+            self.theme_combo.addItems(themes)
+        else:
+            self.theme_combo.addItem("dark_teal.xml")
+            self.theme_combo.setEnabled(False)
+        current_theme = self.config.get("ui", {}).get("theme", "dark_teal.xml")
+        if current_theme in [self.theme_combo.itemText(i) for i in range(self.theme_combo.count())]:
+            self.theme_combo.setCurrentText(current_theme)
+        self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
+        theme_layout.addRow("Theme:", self.theme_combo)
+        theme_group.setLayout(theme_layout)
+        layout.addWidget(theme_group, 3, 0)
+
+        layout.setColumnStretch(0, 1)
+        layout.setColumnStretch(1, 1)
+        layout.setRowStretch(4, 1)
+        self.tab_tools.setLayout(layout)
 
     # -------- Helpers ----------
     def log_to_console(self, message):
         self.console.append(message)
         self.console.verticalScrollBar().setValue(self.console.verticalScrollBar().maximum())
+
+    def position_console_button(self):
+        if not hasattr(self, "console_clear_btn"):
+            return
+        margin = 2
+        btn = self.console_clear_btn
+        btn.adjustSize()
+        x = max(margin, self.console.viewport().width() - btn.width() - margin)
+        y = margin
+        btn.move(x, y)
+        btn.raise_()
+
+    def eventFilter(self, obj, event):
+        if obj == getattr(self, "console", None) and event.type() == QEvent.Resize:
+            self.position_console_button()
+        return super().eventFilter(obj, event)
+
+    def apply_ui_font(self, size):
+        app = QApplication.instance()
+        if not app:
+            return
+        try:
+            base = app.property("base_stylesheet")
+            if base:
+                app.setStyleSheet(f"{base}\n*{{font-size:{int(size)}pt;}}")
+                self.position_console_button()
+            else:
+                font = app.font()
+                font.setPointSize(int(size))
+                app.setFont(font)
+        except Exception:
+            pass
+
+    def get_material_themes(self):
+        try:
+            import qt_material
+            return qt_material.list_themes()
+        except Exception:
+            return []
+
+    def on_theme_changed(self, theme):
+        self.config.setdefault("ui", {})["theme"] = theme
+        self.save_config()
+        app = QApplication.instance()
+        if not app:
+            return
+        if not apply_material_theme(app, theme=theme):
+            apply_dark_theme(app)
+        self.apply_ui_font(self.config.get("ui", {}).get("font_size", 11))
+
+    def on_font_size_changed(self, size):
+        self.config.setdefault("ui", {})["font_size"] = int(size)
+        self.save_config()
+        self.apply_ui_font(size)
 
     def update_class_list(self):
         self.class_list.clear()
@@ -391,7 +1473,24 @@ class YOLOApp(QWidget):
             "resume": bool(self.continue_checkbox.isChecked()),
             "exist_ok": bool(self.exist_ok_checkbox.isChecked()),
             "save_period": int(self.save_period_input.value()),
-            "patience": int(self.patience_input.value())
+            "patience": int(self.patience_input.value()),
+            "lr0": float(self.lr0_input.value()),
+            "optimizer": self.optimizer_input.text().strip() or "SGD",
+            "mosaic": float(self.mosaic_input.value()),
+            "mixup": float(self.mixup_input.value()),
+            "copy_paste": float(self.copy_paste_input.value()),
+            "hsv_h": float(self.hsv_h_input.value()),
+            "hsv_s": float(self.hsv_s_input.value()),
+            "hsv_v": float(self.hsv_v_input.value()),
+            "fliplr": float(self.fliplr_input.value()),
+            "flipud": float(self.flipud_input.value()),
+            "scale": float(self.scale_input.value()),
+            "translate": float(self.translate_input.value()),
+            "shear": float(self.shear_input.value()),
+            "erasing": float(self.erasing_input.value()),
+            "amp": bool(self.amp_checkbox.isChecked()),
+            "plots": bool(self.plots_checkbox.isChecked()),
+            "save_json": bool(self.save_json_checkbox.isChecked())
         }
         self.save_config()
 
@@ -445,6 +1544,7 @@ class YOLOApp(QWidget):
         self.console.append("Starting data collection…")
         self.capture_thread = CaptureThread(self.capture)
         self.capture_thread.frame_signal.connect(self.display_frame)
+        self.capture_thread.log_signal.connect(self.log_to_console)
         # Если поток завершится сам (по ошибке/по стопу) — вернуть кнопку в исходное состояние
         self.capture_thread.finished.connect(self.on_data_collection_finished)
         self.capture_thread.start()
@@ -489,6 +1589,17 @@ class YOLOApp(QWidget):
         self.config["last_data_yaml"] = data_path
         self.save_config()
 
+        overrides = {}
+        td = self.config.get("train_defaults", {})
+        for key in (
+            "lr0", "optimizer", "mosaic", "mixup", "copy_paste",
+            "hsv_h", "hsv_s", "hsv_v", "fliplr", "flipud",
+            "scale", "translate", "shear", "erasing",
+            "amp", "plots", "save_json"
+        ):
+            if key in td:
+                overrides[key] = td[key]
+
         # Формируем параметры
         params = {
             "data_yaml": data_path,
@@ -499,7 +1610,8 @@ class YOLOApp(QWidget):
             "resume": self.continue_checkbox.isChecked(),
             "exist_ok": self.exist_ok_checkbox.isChecked(),
             "save_period": self.save_period_input.value(),
-            "patience": self.patience_input.value()
+            "patience": self.patience_input.value(),
+            "overrides": overrides
         }
 
         # Запускаем обучение в QThread
@@ -566,72 +1678,156 @@ class YOLOApp(QWidget):
             self.save_config()
 
     def split_dataset(self):
-        self.console.append("Splitting dataset…")
-        os.system('python splitDatasetFiles.py')
+        folder = QFileDialog.getExistingDirectory(self, "Select Dataset Folder", self.config.get("data_folder", ""))
+        if not folder:
+            self.console.append("[INFO] Split cancelled.")
+            return
+        self.console.append(f"Splitting dataset: {folder}")
+        script_path = Path(__file__).resolve().parent / "Core" / "splitDatasetFiles.py"
+        subprocess.Popen([sys.executable, str(script_path), "--data-folder", folder])
 
     def open_config_dialog(self):
-        dlg = ConfigDialog(self.config)
+        dlg = ConfigDialog(self.config, self.config_path)
         if dlg.exec_():
             self.update_class_list()
 
+    def open_streamcut_dialog(self):
+        dlg = StreamCutDialog(self)
+        dlg.exec_()
+
+    def open_benchmark_dialog(self):
+        dlg = BenchmarkDialog(log_callback=self.log_to_console, parent=self)
+        dlg.exec_()
+
     def restore_default_config(self):
         default = {
-            {
-                "model_path": "models/sunxds_0.7.6.pt",
-                "classes": [
-                    "player",
-                    "bot",
-                    "weapon",
-                    "outline",
-                    "dead_body",
-                    "hideout_target_human",
-                    "hideout_target_balls",
-                    "head",
-                    "smoke",
-                    "fire",
-                    "third_person"
-                ],
-                "class_map": {},
-                "grabber": {
-                    "crop_size": 0.8,
-                    "width": 547,
-                    "height": 259
-                },
-                "output_folder": "dataset_output",
-                "save_interval": 6,
-                "detection_threshold": 0.4,
-                "data_folder": "stream/dataset",
-                "last_data_yaml": "datasets/data.yaml",
-                "train_defaults": {
-                    "epochs": 26,
-                    "imgsz": 640,
-                    "batch": 16,
-                    "project_name": "runs/name",
-                    "save_period": 50,
-                    "patience": 20
-                }
+            "model_path": "models/sunxds_0.7.6.pt",
+            "classes": [
+                "player",
+                "bot",
+                "weapon",
+                "outline",
+                "dead_body",
+                "hideout_target_human",
+                "hideout_target_balls",
+                "head",
+                "smoke",
+                "fire",
+                "third_person"
+            ],
+            "class_map": {},
+            "grabber": {
+                "crop_size": 0.8,
+                "width": 547,
+                "height": 259
+            },
+            "output_folder": "dataset_output",
+            "save_interval": 6,
+            "detection_threshold": 0.4,
+            "data_folder": "stream/dataset",
+            "last_data_yaml": "datasets/data.yaml",
+            "train_defaults": {
+                "epochs": 26,
+                "imgsz": 640,
+                "batch": 16,
+                "project_name": "runs/name",
+                "save_period": 50,
+                "patience": 20
             }
         }
         self.config = default
+        self.config.setdefault("ui", {})["theme"] = "dark_teal.xml"
+        self.config.setdefault("ui", {})["font_size"] = 11
         self.save_config()
         self.update_class_list()
         self.console.append("Configuration restored to default.")
         self.data_yaml_input.setText("datasets/Valorant/data.yaml")
 
 
+
+def apply_material_theme(app, theme="dark_teal.xml", density_scale="0"):
+    try:
+        # Suppress qt_material import warning for Qt5
+        root_logger = logging.getLogger()
+        prev_level = root_logger.level
+        root_logger.setLevel(logging.ERROR)
+        try:
+            import qt_material
+            from qt_material import build_stylesheet
+            from qt_material.resources import RESOURCES_PATH
+        finally:
+            root_logger.setLevel(prev_level)
+
+        extra = {"density_scale": density_scale}
+        stylesheet = build_stylesheet(theme=theme, extra=extra, parent="qt_material", export=True)
+        if not stylesheet:
+            return False
+
+        # Register icon search path for Qt5
+        try:
+            from PyQt5.QtCore import QDir
+            QDir.addSearchPath("icon", str(Path(RESOURCES_PATH) / "qt_material"))
+        except Exception:
+            pass
+
+        # Load fonts manually (qt_material Qt6-only loader is skipped)
+        try:
+            from PyQt5.QtGui import QFontDatabase
+            fonts_dir = Path(qt_material.__file__).resolve().parent / "fonts" / "roboto"
+            for font_path in fonts_dir.glob("*.ttf"):
+                QFontDatabase.addApplicationFont(str(font_path))
+        except Exception:
+            pass
+
+        app.setProperty("base_stylesheet", stylesheet)
+        app.setStyle("Fusion")
+        app.setStyleSheet(stylesheet)
+        return True
+    except Exception as exc:
+        logging.warning("qt_material setup failed: %s", exc)
+        return False
+
+
 def apply_dark_theme(app):
-    app.setStyleSheet("""
+    stylesheet = """
         QWidget { background-color: #2e2e2e; color: white; }
         QPushButton { background-color: #444; color: white; border: 1px solid #666; padding: 5px; }
         QLineEdit, QTextBrowser, QListWidget, QSpinBox, QDoubleSpinBox {
             background-color: #333; color: white; border: 1px solid #666;
         }
-    """)
+        QTabWidget::pane { border: 1px solid #444; }
+        QTabBar::tab {
+            background-color: #3a3a3a; color: #e6e6e6;
+            padding: 6px 12px; border: 1px solid #444; border-bottom: none;
+        }
+        QTabBar::tab:selected { background-color: #2f2f2f; color: #ffffff; }
+        QTabBar::tab:hover { background-color: #4a4a4a; }
+    """
+    app.setProperty("base_stylesheet", stylesheet)
+    app.setStyleSheet(stylesheet)
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    apply_dark_theme(app)
+    _theme = "dark_teal.xml"
+    try:
+        _cfg = Path(__file__).resolve().parent / "configs" / "config.json"
+        if _cfg.exists():
+            _raw = None
+            for enc in ("utf-8", "utf-8-sig", "cp1251"):
+                try:
+                    _raw = _cfg.read_text(encoding=enc)
+                    break
+                except Exception:
+                    _raw = None
+            if _raw is None:
+                _raw = _cfg.read_text(encoding="utf-8", errors="ignore")
+            _data = json.loads(_raw)
+            _theme = _data.get("ui", {}).get("theme", _theme)
+    except Exception:
+        pass
+    if not apply_material_theme(app, theme=_theme):
+        apply_dark_theme(app)
     window = YOLOApp()
     window.show()
     sys.exit(app.exec_())
