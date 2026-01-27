@@ -1,12 +1,15 @@
 import os
 import sys
 import json
+from pathlib import Path
 import torch
 import argparse
 from ultralytics import YOLO
 
 
-def load_config(path='config.json'):
+def load_config(path=None):
+    if path is None:
+        path = Path(__file__).resolve().parent.parent / "configs" / "config.json"
     if os.path.exists(path):
         with open(path, 'r') as f:
             return json.load(f)
@@ -27,7 +30,8 @@ def train_yolo(
     save_period=100,
     log=print,
     stop_callback=lambda: False,
-    patience = 20
+    patience = 20,
+    overrides=None
 ):
     try:
         if device is None:
@@ -55,7 +59,7 @@ def train_yolo(
         model = YOLO(model_path)
 
         log("[INFO] Starting training...")
-        model.train(
+        train_kwargs = dict(
             data=data_yaml,
             epochs=epochs,
             imgsz=imgsz,
@@ -85,6 +89,11 @@ def train_yolo(
             optimizer='SGD',
             lr0=0.001
         )
+
+        if overrides and isinstance(overrides, dict):
+            train_kwargs.update(overrides)
+
+        model.train(**train_kwargs)
 
         if stop_callback():
             log("[INFO] Training was manually interrupted.")

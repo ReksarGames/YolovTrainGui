@@ -2,6 +2,7 @@ import os
 import time
 import json
 import logging
+from pathlib import Path
 import cv2
 import numpy as np
 from datetime import datetime
@@ -14,6 +15,7 @@ class ScreenCapture:
         self.config = config
         self.output_folder = output_folder
         self.log = log_callback
+        self.on_frame_ready = None
         self.stop_flag = False
         self.last_detection_time = 0
 
@@ -110,6 +112,7 @@ class ScreenCapture:
             rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = self.model(rgb)
 
+            annotated = frame
             if results and len(results[0].boxes) > 0:
                 now = time.time()
                 if now - self.last_detection_time > self.config.get("save_interval", 1):
@@ -119,6 +122,12 @@ class ScreenCapture:
                 annotated = self.draw_boxes(frame, results)
                 cv2.imshow("Detection Result", annotated)
                 # self.log(f"[INFO] Detections: {len(results[0].boxes)}")
+
+            if self.on_frame_ready:
+                try:
+                    self.on_frame_ready(annotated)
+                except Exception:
+                    pass
 
             if cv2.waitKey(1) & 0xFF == ord('p'):
                 self.stop_flag = True
@@ -131,7 +140,9 @@ class ScreenCapture:
         self.capture_and_display()
 
 
-def load_config(config_file="config.json"):
+def load_config(config_file=None):
+    if config_file is None:
+        config_file = Path(__file__).resolve().parent.parent / "configs" / "config.json"
     with open(config_file, 'r') as f:
         return json.load(f)
 

@@ -2,6 +2,8 @@ import os
 import shutil
 import random
 import json
+import argparse
+from pathlib import Path
 
 
 # Функция для создания необходимых директорий в папке split
@@ -49,7 +51,9 @@ def split_dataset(images_dir, labels_dir, output_base_dir, train_ratio=0.8, val_
 
 
 # Загрузка конфигурации из файла
-def load_config(config_file="config.json"):
+def load_config(config_file=None):
+    if config_file is None:
+        config_file = Path(__file__).resolve().parent.parent / "configs" / "config.json"
     with open(config_file, 'r') as f:
         config = json.load(f)
     return config
@@ -73,7 +77,14 @@ def perform_split(config):
 
 # Главная функция
 if __name__ == "__main__":
-    config = load_config("config.json")  # Загружаем конфигурацию из файла
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data-folder", default=None, help="Dataset folder containing images/labels")
+    args = parser.parse_args()
+
+    config = load_config()  # Загружаем конфигурацию из файла
+    if args.data_folder:
+        config["data_folder"] = args.data_folder
 
     # Выполняем split
     perform_split(config)
+

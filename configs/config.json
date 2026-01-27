@@ -1,0 +1,70 @@
+{
+    "model_path": "E:/Project/PythonProjects/YolovTrainGui/models/sunxds_0.7.6.pt",
+    "classes": [
+        "player",
+        "bot",
+        "weapon",
+        "outline",
+        "dead_body",
+        "hideout_target_human",
+        "hideout_target_balls",
+        "head",
+        "smoke",
+        "fire",
+        "third_person"
+    ],
+    "class_map": {
+        "player": 0,
+        "bot": 1,
+        "weapon": 2,
+        "outline": 3,
+        "dead_body": 4,
+        "hideout_target_human": 5,
+        "hideout_target_balls": 6,
+        "head": 7,
+        "smoke": 8,
+        "fire": 9,
+        "third_person": 10
+    },
+    "grabber": {
+        "crop_size": 0.8,
+        "width": 640,
+        "height": 640
+    },
+    "output_folder": "dataset_output",
+    "save_interval": 6,
+    "detection_threshold": 0.4,
+    "data_folder": "E:/Project/PythonProjects/YolovTrainGui/datasets/hunt_realese",
+    "last_data_yaml": "E:/Project/PythonProjects/YolovTrainGui/datasets/hunt_realese/split_dataset/data.yaml",
+    "train_defaults": {
+        "epochs": 140,
+        "imgsz": 640,
+        "batch": 16,
+        "project_name": "runs/hunt_600",
+        "resume": false,
+        "exist_ok": false,
+        "save_period": 50,
+        "patience": 20,
+        "lr0": 0.001,
+        "optimizer": "SGD",
+        "mosaic": 1.0,
+        "mixup": 0.1,
+        "copy_paste": 0.05,
+        "hsv_h": 0.02,
+        "hsv_s": 0.7,
+        "hsv_v": 0.5,
+        "fliplr": 0.5,
+        "flipud": 0.0,
+        "scale": 0.6,
+        "translate": 0.2,
+        "shear": 0.1,
+        "erasing": 0.3,
+        "amp": true,
+        "plots": true,
+        "save_json": true
+    },
+    "ui": {
+        "font_size": 10,
+        "theme": "dark_teal.xml"
+    }
+}

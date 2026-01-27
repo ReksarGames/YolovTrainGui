@@ -32,7 +32,9 @@ class StreamCut:
         os.makedirs(self.labels_folder, exist_ok=True)
 
         # ——— Параметры ———
-        self.video_sources       = cfg["video_sources"]
+        selected_sources = cfg.get("selected_video_sources", [])
+        use_selected_only = cfg.get("use_selected_only", False)
+        self.video_sources = selected_sources if (use_selected_only and selected_sources) else cfg["video_sources"]
         self.chunks_per_stream   = cfg["chunks_per_stream"]
         self.time_interval       = cfg["time_interval"]
         self.detection_threshold = cfg["detection_threshold"]
@@ -41,7 +43,7 @@ class StreamCut:
         self.twitch_cookies_path = cfg.get("twitch_cookies_path", None)
 
         # ——— Размер сохранения скринов ———
-        self.crop_size = 1000
+        self.crop_size = 900
 
         # ——— Параллельность ———
         self.max_download_workers = cfg["max_download_workers"]
@@ -56,14 +58,26 @@ class StreamCut:
 
         # ——— Модель ———
         self.model = YOLO(self.model_path)
+        self.stop_flag = False
+        self.on_download_info = None
+        self.on_download_progress = None
+
+    def stop(self):
+        self.stop_flag = True
 
     def log(self, msg: str):
         print(msg)
 
     def download_all(self):
         """Параллельно скачиваем VOD в raw_stream_folder. Сначала без cookies, если не выйдет — пробуем с cookies."""
+        if self.stop_flag:
+            return
+
+        import yt_dlp
+        from yt_dlp.utils import DownloadCancelled
 
         # Проверяем файл cookies
+        cookies_file = None
         if getattr(self, "twitch_cookies_path", None):
             if not os.path.isfile(self.twitch_cookies_path):
                 raise FileNotFoundError(
@@ -75,46 +89,81 @@ class StreamCut:
                     f"[ERROR] Файл cookies пустой: {self.twitch_cookies_path}\n"
                     f"Экспортируй cookies из браузера в формате Netscape."
                 )
-            # Простейшая проверка формата Netscape (должна быть строка с 'twitch.tv')
-            with open(self.twitch_cookies_path, "r", encoding="utf-8", errors="ignore") as f:
-                data = f.read()
-                if "twitch.tv" not in data:
-                    raise ValueError(
-                        f"[ERROR] Файл cookies не похож на twitch cookies: {self.twitch_cookies_path}"
-                    )
 
-        def dl(url):
-            base_cmd = [
-                "yt-dlp",
-                "--download-archive", self.download_archive,
-                "--output", os.path.join(self.raw_stream_folder, "%(id)s.%(ext)s"),
-                "--format", "best",
-                url
-            ]
-
-            # Пробуем без cookies
-            try:
-                subprocess.run(base_cmd, check=True)
-                self.log(f"[DOWNLOAD] {url} (без cookies)")
-                return
-            except subprocess.CalledProcessError as e:
-                self.log(f"[WARNING] {url} — требуется авторизация, пробую с cookies")
-                self.log(f"[yt-dlp output]\n{e}")
-
-            # Пробуем с cookies
-            if getattr(self, "twitch_cookies_path", None):
-                cmd_with_cookies = base_cmd + ["--cookies", self.twitch_cookies_path]
-                try:
-                    subprocess.run(cmd_with_cookies, check=True)
-                    self.log(f"[DOWNLOAD] {url} (с cookies)")
-                except subprocess.CalledProcessError as e:
-                    self.log(f"[ERROR] Не удалось скачать {url} даже с cookies")
-                    self.log(f"[yt-dlp output]\n{e}")
+            with open(self.twitch_cookies_path, "rb") as f:
+                header = f.read(16)
+            if header.startswith(b"SQLite format 3"):
+                self.log("[WARNING] Cookies file looks like a browser database (SQLite). Export Netscape cookies instead.")
             else:
-                self.log(f"[ERROR] Нет cookies файла для {url}")
+                raw = None
+                for enc in ("utf-8", "utf-8-sig", "cp1251", "latin-1"):
+                    try:
+                        raw = Path(self.twitch_cookies_path).read_text(encoding=enc)
+                        break
+                    except Exception:
+                        raw = None
+                if raw is None:
+                    self.log("[WARNING] Cookies file encoding is unknown. Cookies will be ignored.")
+                else:
+                    cookies_tmp = Path(self.output_folder).parent / "cookies_utf8.txt"
+                    cookies_tmp.write_text(raw, encoding="utf-8")
+                    cookies_file = str(cookies_tmp)
+                    if "twitch.tv" not in raw:
+                        self.log("[WARNING] Cookies file does not contain twitch.tv; auth might fail.")
 
-        with ThreadPoolExecutor(max_workers=self.max_download_workers) as ex:
-            ex.map(dl, self.video_sources)
+        def progress_hook(d):
+            if self.stop_flag:
+                raise DownloadCancelled()
+            if d.get("status") == "downloading":
+                total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                downloaded = d.get("downloaded_bytes")
+                percent = 0
+                if total and downloaded:
+                    try:
+                        percent = int((downloaded / total) * 100)
+                    except Exception:
+                        percent = 0
+                info = {
+                    "title": d.get("info_dict", {}).get("title"),
+                    "total_bytes": total,
+                    "downloaded_bytes": downloaded,
+                    "speed_bytes": d.get("speed"),
+                    "eta": d.get("eta"),
+                    "percent": percent,
+                }
+                if self.on_download_progress:
+                    self.on_download_progress(info)
+
+        ydl_opts = {
+            "outtmpl": os.path.join(self.raw_stream_folder, "%(id)s.%(ext)s"),
+            "format": "best",
+            "download_archive": self.download_archive,
+            "progress_hooks": [progress_hook],
+            "quiet": True,
+            "no_warnings": True,
+            "ignoreconfig": True,
+        }
+
+        if cookies_file:
+            ydl_opts["cookiefile"] = cookies_file
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            for url in self.video_sources:
+                if self.stop_flag:
+                    break
+                try:
+                    info = ydl.extract_info(url, download=False)
+                    title = info.get("title")
+                    size = info.get("filesize") or info.get("filesize_approx")
+                    if self.on_download_info:
+                        self.on_download_info({"title": title, "size_bytes": size})
+                    ydl.download([url])
+                    self.log(f"[DOWNLOAD] {url} (ok)")
+                except DownloadCancelled:
+                    self.log("[INFO] Download cancelled by user.")
+                    break
+                except Exception as e:
+                    self.log(f"[ERROR] Download failed for {url}: {e}")
 
     def _get_duration(self, path: Path) -> float:
         """Возвращает длительность видео в секундах через ffprobe.exe."""
@@ -142,10 +191,14 @@ class StreamCut:
         if not files:
             self.log(f"[SPLIT] ⚠ Нет исходных видео в {self.raw_stream_folder}")
             return
+        if self.stop_flag:
+            return
 
         self.log(f"[SPLIT] Режу {len(files)} файлов на {self.chunks_per_stream} частей…")
 
         def split_file(path: Path):
+            if self.stop_flag:
+                return
             base = path.stem
             existing = list(Path(self.chunks_folder).glob(f"{base}_*.ts"))
             if len(existing) >= self.chunks_per_stream:
@@ -177,7 +230,8 @@ class StreamCut:
                 self.log(f"[ERROR] FFmpeg нарезка {base} упала: {e}")
 
         with ThreadPoolExecutor(max_workers=self.split_workers) as ex:
-            ex.map(split_file, files)
+            if not self.stop_flag:
+                ex.map(split_file, files)
 
     def process_all(self):
         """
@@ -186,6 +240,8 @@ class StreamCut:
         Поддерживает фильтрацию по именам классов и переиндексацию.
         """
         os.makedirs(os.path.dirname(self.resume_info_file), exist_ok=True)
+        if self.stop_flag:
+            return
         if os.path.exists(self.resume_info_file):
             with open(self.resume_info_file, 'r') as f:
                 resume = json.load(f)
@@ -222,6 +278,8 @@ class StreamCut:
 
         def saver():
             while True:
+                if self.stop_flag:
+                    break
                 itm = save_q.get()
                 if itm is None:
                     break
@@ -256,15 +314,28 @@ class StreamCut:
             cap = cv2.VideoCapture(str(ts_path))
             idx = 0
             while True:
+                if self.stop_flag:
+                    break
                 ret, frame = cap.read()
                 if not ret:
                     break
 
                 h, w = frame.shape[:2]
+                h, w = frame.shape[:2]
                 crop_size = self.crop_size
 
-                x0, y0 = (w - crop_size) // 2, (h - crop_size) // 2
-                crop = frame[y0:y0 + crop_size, x0:x0 + crop_size]
+                # если кадр меньше crop_size — уменьшаем crop_size до минимального измерения
+                if crop_size > min(w, h):
+                    crop_size = min(w, h)
+
+                # координаты центра
+                x0 = max((w - crop_size) // 2, 0)
+                y0 = max((h - crop_size) // 2, 0)
+                x1 = x0 + crop_size
+                y1 = y0 + crop_size
+
+                # фиксированное центральное окно
+                crop = frame[y0:y1, x0:x1]
 
                 if idx % self.time_interval == 0:
                     results = self.model(crop, imgsz=(640, 640), conf=self.detection_threshold)
@@ -298,13 +369,17 @@ class StreamCut:
 
             cap.release()
             with resume_lock:
-                resume["processed_chunks"].append(base)
-                with open(self.resume_info_file, 'w') as f:
-                    json.dump(resume, f)
+                if base not in resume["processed_chunks"]:
+                    resume["processed_chunks"].append(base)
+                    with open(self.resume_info_file, 'w') as f:
+                        json.dump(resume, f)
 
+        if self.stop_flag:
+            return
         self.log(f"[INFO] Processing {len(chunks)} chunks with {self.process_workers} workers")
         with ThreadPoolExecutor(max_workers=self.process_workers) as ex:
-            ex.map(proc_chunk, chunks)
+            if not self.stop_flag:
+                ex.map(proc_chunk, chunks)
 
         save_q.join()
         for _ in savers:
@@ -314,9 +389,15 @@ class StreamCut:
 
     def run(self):
         self.download_all()
+        if self.stop_flag:
+            return
         self.split_all()
+        if self.stop_flag:
+            return
         self.process_all()
-        self.log("[DONE]")
+        if not self.stop_flag:
+            self.log("[DONE]")
 
 if __name__ == "__main__":
-    StreamCut("configStreamCut.json").run()
+    default_cfg = Path(__file__).resolve().parent.parent / "configs" / "configStreamCut.json"
+    StreamCut(str(default_cfg)).run()

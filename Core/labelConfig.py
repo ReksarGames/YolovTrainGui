@@ -2,6 +2,7 @@ import cv2
 import os
 import json
 import numpy as np
+from pathlib import Path
 
 ref_point = []
 cropping = False
@@ -34,7 +35,9 @@ class ColorGenerator:
         return self.colors[class_id] if 0 <= class_id < self.num_classes else (255, 255, 255)  # Белый цвет по умолчанию для несуществующих классов
 
 
-def load_config(config_file="config.json"):
+def load_config(config_file=None):
+    if config_file is None:
+        config_file = Path(__file__).resolve().parent.parent / "configs" / "config.json"
     with open(config_file, 'r') as f:
         config = json.load(f)
 
@@ -95,6 +98,11 @@ def draw_labels_on_image(image_path, label_path):
 
         class_color = class_colors.get(int(class_id), (255, 255, 255))
         cv2.rectangle(image, (x1, y1), (x2, y2), class_color, 2)
+
+        # ✨ Добавляем текст над боксом
+        label_text = f"{int(class_id)}: {class_names.get(int(class_id), 'Unknown')}"
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        cv2.putText(image, label_text, (x1, max(y1 - 10, 20)), font, 0.6, class_color, 2, cv2.LINE_AA)
 
     display_current_class(image)
 
@@ -268,7 +276,7 @@ def switch_class(direction=1):
     update_image_window(image_copy)
 
 
-config = load_config("config.json")
+config = load_config()
 
 generate_class_colors()
 
