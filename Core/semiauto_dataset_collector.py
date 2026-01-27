@@ -11,13 +11,14 @@ import mss
 from screeninfo import get_monitors
 
 class ScreenCapture:
-    def __init__(self, config, output_folder, log_callback=print):
+    def __init__(self, config, output_folder, log_callback=print, show_window=True):
         self.config = config
         self.output_folder = output_folder
         self.log = log_callback
         self.on_frame_ready = None
         self.stop_flag = False
         self.last_detection_time = 0
+        self.show_window = show_window
 
         # Загрузка модели
         self.model = YOLO(self.config["model_path"], verbose=False).to('cuda').half()
@@ -120,7 +121,8 @@ class ScreenCapture:
                     self.last_detection_time = now
 
                 annotated = self.draw_boxes(frame, results)
-                cv2.imshow("Detection Result", annotated)
+                if self.show_window:
+                    cv2.imshow("Detection Result", annotated)
                 # self.log(f"[INFO] Detections: {len(results[0].boxes)}")
 
             if self.on_frame_ready:
@@ -129,12 +131,14 @@ class ScreenCapture:
                 except Exception:
                     pass
 
-            if cv2.waitKey(1) & 0xFF == ord('p'):
-                self.stop_flag = True
+            if self.show_window:
+                if cv2.waitKey(1) & 0xFF == ord('p'):
+                    self.stop_flag = True
 
             time.sleep(0.01)
 
-        cv2.destroyAllWindows()
+        if self.show_window:
+            cv2.destroyAllWindows()
 
     def run(self):
         self.capture_and_display()

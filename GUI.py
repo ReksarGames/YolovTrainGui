@@ -2,18 +2,22 @@ import os
 import sys
 import json
 import subprocess
+import re
+import shutil
+import urllib.request
+from urllib.parse import urlparse
 import logging
 import time
 from pathlib import Path
 
 import cv2
 import numpy as np
-from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtGui import QImage, QPixmap, QIcon
 from PyQt5.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QPushButton, QLineEdit, QLabel,
     QListWidget, QListWidgetItem, QTextBrowser, QFileDialog, QFormLayout, QGridLayout, QDoubleSpinBox,
     QSpinBox, QDialog, QGroupBox, QHBoxLayout, QCheckBox, QSizePolicy, QSplitter, QMessageBox,
-    QTextEdit, QTabWidget, QComboBox, QProgressBar
+    QTextEdit, QTabWidget, QComboBox, QProgressBar, QInputDialog, QStyle, QToolButton
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QEvent, QTimer
 from ultralytics import YOLO
@@ -153,6 +157,108 @@ class BenchmarkThread(QThread):
             self.log_signal.emit(f"[ERROR] Benchmark failed: {e}")
             self.finished.emit(False)
 
+# -------------------- Model Download Thread --------------------
+class ModelDownloadThread(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(bool, str)
+
+    def __init__(self, model_ref, dest_folder):
+        super().__init__()
+        self.model_ref = model_ref.strip()
+        self.dest_folder = dest_folder
+
+    def run(self):
+        if not self.model_ref:
+            self.log_signal.emit("[ERROR] Model name or URL is empty.")
+            self.finished.emit(False, "")
+            return
+
+        try:
+            Path(self.dest_folder).mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.log_signal.emit(f"[ERROR] Failed to create folder: {e}")
+            self.finished.emit(False, "")
+            return
+
+        if self.model_ref.startswith(("http://", "https://")):
+            try:
+                name = Path(urlparse(self.model_ref).path).name or "model.pt"
+                dest_path = Path(self.dest_folder) / name
+                self.log_signal.emit(f"[INFO] Downloading: {self.model_ref}")
+                urllib.request.urlretrieve(self.model_ref, dest_path)
+                self.log_signal.emit(f"[INFO] Saved: {dest_path}")
+                self.finished.emit(True, str(dest_path))
+            except Exception as e:
+                self.log_signal.emit(f"[ERROR] Download failed: {e}")
+                self.finished.emit(False, "")
+            return
+
+        name = self.model_ref
+        if not Path(name).suffix:
+            name = f"{name}.pt"
+        dest_path = Path(self.dest_folder) / name
+        if dest_path.exists():
+            self.log_signal.emit(f"[INFO] Already exists: {dest_path}")
+            self.finished.emit(True, str(dest_path))
+            return
+
+        try:
+            from ultralytics import YOLO
+        except Exception as e:
+            self.log_signal.emit(f"[ERROR] Ultralytics not available: {e}")
+            self.finished.emit(False, "")
+            return
+
+        try:
+            self.log_signal.emit(f"[INFO] Fetching model: {name}")
+            YOLO(name)
+        except Exception as e:
+            if "yolo26" in name:
+                self.log_signal.emit("[ERROR] YOLO26 weights may be unavailable. Try a direct URL.")
+            self.log_signal.emit(f"[ERROR] Download failed: {e}")
+            self.finished.emit(False, "")
+            return
+
+        if dest_path.exists():
+            self.log_signal.emit(f"[INFO] Saved: {dest_path}")
+            self.finished.emit(True, str(dest_path))
+            return
+
+        # Some ultralytics versions save into CWD; move it into the requested folder.
+        cwd_candidate = Path.cwd() / name
+        script_candidate = Path(__file__).resolve().parent / name
+        for candidate in (cwd_candidate, script_candidate):
+            if candidate.exists():
+                try:
+                    shutil.move(str(candidate), str(dest_path))
+                    self.log_signal.emit(f"[INFO] Moved from {candidate} to {dest_path}")
+                    self.finished.emit(True, str(dest_path))
+                    return
+                except Exception:
+                    pass
+
+        cache_roots = [
+            Path.home() / ".cache" / "ultralytics",
+            Path.home() / ".cache" / "torch" / "hub",
+            Path.home() / ".cache" / "torch" / "hub" / "checkpoints",
+        ]
+        for root in cache_roots:
+            if not root.exists():
+                continue
+            try:
+                hit = next(root.rglob(name))
+                shutil.copy2(hit, dest_path)
+                self.log_signal.emit(f"[INFO] Copied from cache: {dest_path}")
+                self.finished.emit(True, str(dest_path))
+                return
+            except StopIteration:
+                continue
+            except Exception:
+                continue
+
+        self.log_signal.emit("[WARNING] Model downloaded to cache, but local file not found.")
+        self.finished.emit(False, "")
+
 # -------------------- StreamCut Dialog --------------------
 class StreamCutDialog(QDialog):
     def __init__(self, parent=None):
@@ -210,24 +316,28 @@ class StreamCutDialog(QDialog):
 
         form = QFormLayout()
 
-        self.video_sources_input = QTextEdit()
-        self.video_sources_input.setPlaceholderText("One URL per line")
-        self.video_sources_input.setToolTip("List of VOD URLs, one per line.")
-        form.addRow("Video sources:", self.video_sources_input)
-
         self.video_sources_list = QListWidget()
-        self.video_sources_list.setToolTip("Select which sources to download.")
-        form.addRow("Select sources:", self.video_sources_list)
+        self.video_sources_list.setToolTip("List of VOD URLs. Check to download. Downloaded items show an icon.")
+        self.video_sources_list.setSelectionMode(QListWidget.ExtendedSelection)
+        form.addRow("Video sources:", self.video_sources_list)
 
         sources_btns = QHBoxLayout()
+        btn_add_source = QPushButton("Add")
+        btn_add_source.setToolTip("Add a new source line.")
+        btn_add_source.clicked.connect(self.add_video_source)
         btn_sync_sources = QPushButton("Sync")
-        btn_sync_sources.setToolTip("Sync checkbox list from text field.")
-        btn_sync_sources.clicked.connect(self.sync_video_sources_list)
+        btn_sync_sources.setToolTip("Mark already downloaded streams.")
+        btn_sync_sources.clicked.connect(self.sync_downloaded_sources)
+        btn_remove_sources = QPushButton("Remove")
+        btn_remove_sources.setToolTip("Remove selected sources.")
+        btn_remove_sources.clicked.connect(self.remove_selected_sources)
         btn_check_all = QPushButton("Check all")
         btn_check_all.clicked.connect(lambda: self.set_sources_check_state(Qt.Checked))
         btn_uncheck_all = QPushButton("Uncheck all")
         btn_uncheck_all.clicked.connect(lambda: self.set_sources_check_state(Qt.Unchecked))
+        sources_btns.addWidget(btn_add_source)
         sources_btns.addWidget(btn_sync_sources)
+        sources_btns.addWidget(btn_remove_sources)
         sources_btns.addWidget(btn_check_all)
         sources_btns.addWidget(btn_uncheck_all)
         form.addRow("", sources_btns)
@@ -237,7 +347,6 @@ class StreamCutDialog(QDialog):
         self.use_selected_only_checkbox.setChecked(True)
         form.addRow("", self.use_selected_only_checkbox)
 
-        self.video_sources_input.textChanged.connect(self.on_video_sources_changed)
         self.video_sources_list.itemChanged.connect(lambda _: self.schedule_save_config())
         self.use_selected_only_checkbox.toggled.connect(lambda _: self.schedule_save_config())
 
@@ -423,6 +532,8 @@ class StreamCutDialog(QDialog):
         self.console.setMinimumHeight(150)
         layout.addWidget(self.console)
 
+        self._icon_downloaded = self.style().standardIcon(QStyle.SP_DialogApplyButton)
+
         self.setLayout(layout)
 
     def log_to_console(self, message):
@@ -433,8 +544,30 @@ class StreamCutDialog(QDialog):
         if self._save_timer:
             self._save_timer.start(400)
 
-    def on_video_sources_changed(self):
-        self.sync_video_sources_list()
+    def add_video_source(self):
+        text, ok = QInputDialog.getText(self, "Add source", "Video URL:")
+        if not ok:
+            return
+        self.add_video_sources_from_text(text)
+
+    def remove_selected_sources(self):
+        for item in self.video_sources_list.selectedItems():
+            row = self.video_sources_list.row(item)
+            self.video_sources_list.takeItem(row)
+        self.schedule_save_config()
+
+    def add_video_sources_from_text(self, text):
+        lines = [line.strip() for line in text.splitlines() if line.strip()]
+        if not lines:
+            return
+        existing = {self.video_sources_list.item(i).text() for i in range(self.video_sources_list.count())}
+        for line in lines:
+            if line in existing:
+                continue
+            item = QListWidgetItem(line)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            item.setCheckState(Qt.Checked)
+            self.video_sources_list.addItem(item)
         self.schedule_save_config()
 
     def browse_config_path(self):
@@ -469,16 +602,20 @@ class StreamCutDialog(QDialog):
             self.config = {}
             self.log_to_console(f"[ERROR] Failed to load config: {e}")
 
-        self.video_sources_input.setPlainText("\n".join(self.config.get("video_sources", [])))
         self.classes_input.setPlainText("\n".join(self.config.get("classes", [])))
         self.use_selected_only_checkbox.setChecked(bool(self.config.get("use_selected_only", True)))
         self.pause_after_download_checkbox.setChecked(bool(self.config.get("pause_after_download", True)))
-        self.sync_video_sources_list()
+        self.video_sources_list.clear()
+        sources = self.config.get("video_sources", [])
         selected = set(self.config.get("selected_video_sources", []))
-        if selected:
-            for i in range(self.video_sources_list.count()):
-                item = self.video_sources_list.item(i)
-                item.setCheckState(Qt.Checked if item.text() in selected else Qt.Unchecked)
+        for source in sources:
+            item = QListWidgetItem(source)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable | Qt.ItemIsEditable)
+            if selected:
+                item.setCheckState(Qt.Checked if source in selected else Qt.Unchecked)
+            else:
+                item.setCheckState(Qt.Checked)
+            self.video_sources_list.addItem(item)
         self.raw_stream_folder_input.setText(self.config.get("raw_stream_folder", ""))
         self.chunks_folder_input.setText(self.config.get("chunks_folder", ""))
         self.output_folder_input.setText(self.config.get("output_folder", ""))
@@ -494,19 +631,16 @@ class StreamCutDialog(QDialog):
         self.split_workers_input.setValue(int(self.config.get("split_workers", 1)))
         self.process_workers_input.setValue(int(self.config.get("process_workers", 1)))
         self.save_workers_input.setValue(int(self.config.get("save_workers", 1)))
+        self.sync_downloaded_sources()
 
     def update_config_from_fields(self):
-        def to_lines(text):
-            return [line.strip() for line in text.splitlines() if line.strip()]
-
-        self.sync_video_sources_list()
         all_sources = [self.video_sources_list.item(i).text() for i in range(self.video_sources_list.count())]
         selected_sources = self.get_checked_sources()
-        self.config["video_sources"] = all_sources or to_lines(self.video_sources_input.toPlainText())
+        self.config["video_sources"] = all_sources
         self.config["selected_video_sources"] = selected_sources
         self.config["use_selected_only"] = bool(self.use_selected_only_checkbox.isChecked())
         self.config["pause_after_download"] = bool(self.pause_after_download_checkbox.isChecked())
-        self.config["classes"] = to_lines(self.classes_input.toPlainText())
+        self.config["classes"] = [line.strip() for line in self.classes_input.toPlainText().splitlines() if line.strip()]
         self.config["raw_stream_folder"] = self.raw_stream_folder_input.text().strip()
         self.config["chunks_folder"] = self.chunks_folder_input.text().strip()
         self.config["output_folder"] = self.output_folder_input.text().strip()
@@ -523,17 +657,6 @@ class StreamCutDialog(QDialog):
         self.config["process_workers"] = int(self.process_workers_input.value())
         self.config["save_workers"] = int(self.save_workers_input.value())
 
-    def sync_video_sources_list(self):
-        text_sources = [line.strip() for line in self.video_sources_input.toPlainText().splitlines() if line.strip()]
-        existing_states = {self.video_sources_list.item(i).text(): self.video_sources_list.item(i).checkState()
-                           for i in range(self.video_sources_list.count())}
-        self.video_sources_list.clear()
-        for source in text_sources:
-            item = QListWidgetItem(source)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(existing_states.get(source, Qt.Checked))
-            self.video_sources_list.addItem(item)
-
     def set_sources_check_state(self, state):
         for i in range(self.video_sources_list.count()):
             self.video_sources_list.item(i).setCheckState(state)
@@ -545,6 +668,66 @@ class StreamCutDialog(QDialog):
             if item.checkState() == Qt.Checked:
                 sources.append(item.text())
         return sources
+
+    def _extract_id_from_url(self, url):
+        url = url.strip()
+        if not url:
+            return None
+        patterns = [
+            r"twitch\.tv/videos/(?P<id>\d+)",
+            r"youtu\.be/(?P<id>[\w-]+)",
+            r"youtube\.com/watch\?v=(?P<id>[\w-]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                return match.group("id")
+        if re.fullmatch(r"[\w-]+", url):
+            return url
+        try:
+            import yt_dlp
+            with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "ignoreconfig": True}) as ydl:
+                info = ydl.extract_info(url, download=False)
+                return info.get("id")
+        except Exception:
+            return None
+
+    def sync_downloaded_sources(self):
+        raw_folder = self.raw_stream_folder_input.text().strip()
+        archive_path = self.download_archive_input.text().strip()
+        downloaded_ids = set()
+        if archive_path and os.path.isfile(archive_path):
+            try:
+                with open(archive_path, "r", encoding="utf-8", errors="ignore") as f:
+                    downloaded_ids = {line.strip() for line in f if line.strip()}
+            except Exception as e:
+                self.log_to_console(f"[ERROR] Failed to read archive: {e}")
+        downloaded_files = set()
+        if raw_folder and os.path.isdir(raw_folder):
+            try:
+                downloaded_files = {p.stem for p in Path(raw_folder).glob("*.*")}
+            except Exception:
+                downloaded_files = set()
+
+        if not downloaded_ids and not downloaded_files:
+            self.log_to_console("[INFO] No downloaded archive/files found.")
+            return
+
+        marked = 0
+        for i in range(self.video_sources_list.count()):
+            item = self.video_sources_list.item(i)
+            url = item.text()
+            vid = self._extract_id_from_url(url)
+            if not vid:
+                item.setIcon(QIcon())
+                continue
+            if vid in downloaded_files or any(line.endswith(f":{vid}") or line == vid for line in downloaded_ids):
+                item.setIcon(self._icon_downloaded)
+                marked += 1
+            else:
+                item.setIcon(QIcon())
+
+        self.log_to_console(f"[INFO] Sync complete. Marked {marked} downloaded sources.")
 
     def save_config(self):
         path = self.config_path_input.text().strip()
@@ -793,13 +976,6 @@ class ConfigDialog(QDialog):
     def init_ui(self):
         layout = QFormLayout()
 
-        # preview (можно использовать для отображения frame)
-        self.preview_label = QLabel()
-        self.preview_label.setFixedSize(640, 640)
-        self.preview_label.setStyleSheet("border: 1px solid #888; background-color: #111;")
-        self.preview_label.setToolTip("Preview of capture area during data collection.")
-        layout.addWidget(self.preview_label)
-
         # model path
         self.model_path_input = QLineEdit(self.config.get("model_path", ""))
         self.model_path_input.setToolTip("Path to YOLO .pt model for detection.")
@@ -811,31 +987,9 @@ class ConfigDialog(QDialog):
         model_layout.addWidget(btn_model)
         layout.addRow("Model Path:", model_layout)
 
-        # grabber settings
-        self.crop_size_input = QDoubleSpinBox()
-        self.crop_size_input.setSingleStep(0.01)
-        self.crop_size_input.setRange(0.0, 1.0)
-        self.crop_size_input.setValue(self.config.get("grabber", {}).get("crop_size", 0.8))
-        self.crop_size_input.setToolTip("Central crop size (0..1) for capture.")
-        layout.addRow("Crop Size:", self.crop_size_input)
-
-        self.width_input = QSpinBox()
-        self.width_input.setRange(1, 3840)
-        self.width_input.setSingleStep(1)
-        self.width_input.setValue(self.config.get("grabber", {}).get("width", 640))
-        self.width_input.setToolTip("Capture size in pixels.")
-        layout.addRow("Width:", self.width_input)
-
-        self.height_input = QSpinBox()
-        self.height_input.setRange(1, 2160)
-        self.height_input.setSingleStep(1)
-        self.height_input.setValue(self.config.get("grabber", {}).get("height", 640))
-        self.height_input.setToolTip("Capture size in pixels.")
-        layout.addRow("Height:", self.height_input)
-
         # output folder
         self.output_folder_input = QLineEdit(self.config.get("output_folder", ""))
-        self.output_folder_input.setToolTip("Folder for saving images/labels during capture.")
+        self.output_folder_input.setToolTip("Output folder for data collection (images/labels).")
         out_layout = QHBoxLayout()
         out_layout.addWidget(self.output_folder_input)
         btn_out = QPushButton("...")
@@ -844,21 +998,56 @@ class ConfigDialog(QDialog):
         out_layout.addWidget(btn_out)
         layout.addRow("Output Folder:", out_layout)
 
+        note = QLabel("These settings affect data collection/detection only (not training).")
+        note.setWordWrap(True)
+        layout.addRow(note)
+
+        # grabber / detection settings
+        self.crop_size_input = QDoubleSpinBox()
+        self.crop_size_input.setSingleStep(0.01)
+        self.crop_size_input.setRange(0.0, 1.0)
+        self.crop_size_input.setValue(self.config.get("grabber", {}).get("crop_size", 0.8))
+        self.crop_size_input.setToolTip("Central crop size (0..1) for capture.")
+
+        self.width_input = QSpinBox()
+        self.width_input.setRange(1, 3840)
+        self.width_input.setSingleStep(1)
+        self.width_input.setValue(self.config.get("grabber", {}).get("width", 640))
+        self.width_input.setToolTip("Capture width in pixels.")
+
+        self.height_input = QSpinBox()
+        self.height_input.setRange(1, 2160)
+        self.height_input.setSingleStep(1)
+        self.height_input.setValue(self.config.get("grabber", {}).get("height", 640))
+        self.height_input.setToolTip("Capture height in pixels.")
+
+        self.detection_threshold_input = QDoubleSpinBox()
+        self.detection_threshold_input.setValue(self.config.get("detection_threshold", 0.5))
+        self.detection_threshold_input.setToolTip("Confidence threshold for saving detections.")
+
+        detect_group = QGroupBox("Detection / Capture")
+        detect_grid = QGridLayout()
+        detect_grid.setHorizontalSpacing(12)
+        detect_grid.addWidget(QLabel("Crop size:"), 0, 0)
+        detect_grid.addWidget(self.crop_size_input, 0, 1)
+        detect_grid.addWidget(QLabel("Width:"), 0, 2)
+        detect_grid.addWidget(self.width_input, 0, 3)
+        detect_grid.addWidget(QLabel("Height:"), 1, 0)
+        detect_grid.addWidget(self.height_input, 1, 1)
+        detect_grid.addWidget(QLabel("Detection thr:"), 1, 2)
+        detect_grid.addWidget(self.detection_threshold_input, 1, 3)
+        detect_group.setLayout(detect_grid)
+        layout.addRow(detect_group)
+
         # save interval
         self.save_interval_input = QSpinBox()
         self.save_interval_input.setValue(self.config.get("save_interval", 3))
         self.save_interval_input.setToolTip("Min interval between saves (seconds).")
         layout.addRow("Save Interval:", self.save_interval_input)
 
-        # detection threshold
-        self.detection_threshold_input = QDoubleSpinBox()
-        self.detection_threshold_input.setValue(self.config.get("detection_threshold", 0.5))
-        self.detection_threshold_input.setToolTip("Confidence threshold for saving detections.")
-        layout.addRow("Detection Threshold:", self.detection_threshold_input)
-
-        # data folder
+        # data folder (split/label tools)
         self.data_folder_input = QLineEdit(self.config.get("data_folder", ""))
-        self.data_folder_input.setToolTip("Dataset folder with images/labels for split/labeling.")
+        self.data_folder_input.setToolTip("Dataset folder with images/labels for tools (split/label). Not used for training.")
         data_layout = QHBoxLayout()
         data_layout.addWidget(self.data_folder_input)
         btn_data = QPushButton("...")
@@ -866,6 +1055,17 @@ class ConfigDialog(QDialog):
         btn_data.clicked.connect(self.browse_data_folder)
         data_layout.addWidget(btn_data)
         layout.addRow("Data Folder:", data_layout)
+
+        # label verification folder
+        self.label_data_folder_input = QLineEdit(self.config.get("label_data_folder", self.config.get("data_folder", "")))
+        self.label_data_folder_input.setToolTip("Folder with images/labels used by Label Verification tool.")
+        label_layout = QHBoxLayout()
+        label_layout.addWidget(self.label_data_folder_input)
+        btn_label = QPushButton("...")
+        btn_label.setFixedWidth(32)
+        btn_label.clicked.connect(self.browse_label_data_folder)
+        label_layout.addWidget(btn_label)
+        layout.addRow("Label Folder:", label_layout)
 
         # save button
         btn_save = QPushButton("Save")
@@ -890,6 +1090,11 @@ class ConfigDialog(QDialog):
         if folder:
             self.data_folder_input.setText(folder)
 
+    def browse_label_data_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Label Folder")
+        if folder:
+            self.label_data_folder_input.setText(folder)
+
     def save_config(self):
         self.config["model_path"] = self.model_path_input.text()
         self.config["grabber"] = {
@@ -901,6 +1106,7 @@ class ConfigDialog(QDialog):
         self.config["save_interval"] = self.save_interval_input.value()
         self.config["detection_threshold"] = self.detection_threshold_input.value()
         self.config["data_folder"] = self.data_folder_input.text()
+        self.config["label_data_folder"] = self.label_data_folder_input.text()
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.config_path, 'w') as f:
@@ -990,9 +1196,16 @@ class YOLOApp(QWidget):
         self.console_clear_btn.clicked.connect(self.console.clear)
         self.position_console_button()
 
+        console_container = QWidget()
+        console_layout = QVBoxLayout()
+        console_layout.setContentsMargins(0, 0, 0, 0)
+        console_layout.setSpacing(4)
+        console_layout.addWidget(self.console)
+        console_container.setLayout(console_layout)
+
         splitter = QSplitter(Qt.Vertical)
         splitter.addWidget(self.tabs)
-        splitter.addWidget(self.console)
+        splitter.addWidget(console_container)
         splitter.setSizes([600, 200])
 
         layout.addWidget(splitter)
@@ -1063,10 +1276,27 @@ class YOLOApp(QWidget):
         )
         self.btn_data_toggle.clicked.connect(self.toggle_data_collection)
         capture_layout.addWidget(self.btn_data_toggle)
+        self.disable_capture_window_checkbox = QCheckBox("Disable extra preview window (OpenCV)")
+        show_window = bool(self.config.get("ui", {}).get("show_capture_window", False))
+        self.disable_capture_window_checkbox.setChecked(not show_window)
+        self.disable_capture_window_checkbox.setToolTip(
+            "If checked, only the built-in Preview panel is used."
+        )
+        self.disable_capture_window_checkbox.toggled.connect(self.on_capture_window_toggle)
+        capture_layout.addWidget(self.disable_capture_window_checkbox)
         capture_group.setLayout(capture_layout)
+
+        label_group = QGroupBox("Label Verification")
+        label_layout = QVBoxLayout()
+        btn_label_verify = QPushButton("Open Label Verification")
+        btn_label_verify.setToolTip("Open label verification tool for label_data_folder.")
+        btn_label_verify.clicked.connect(self.open_label_verification)
+        label_layout.addWidget(btn_label_verify)
+        label_group.setLayout(label_layout)
 
         left_col.addWidget(class_group)
         left_col.addWidget(capture_group)
+        left_col.addWidget(label_group)
         left_col.addStretch()
 
         left_widget = QWidget()
@@ -1350,6 +1580,64 @@ class YOLOApp(QWidget):
         self.btn_def.clicked.connect(self.restore_default_config)
         layout.addWidget(self.btn_def, 2, 1)
 
+        model_group = QGroupBox("YOLO Model Download")
+        model_layout = QVBoxLayout()
+
+        self.model_download_dir = QLineEdit(str(Path(__file__).resolve().parent / "models"))
+        self.model_download_dir.setToolTip("Destination folder for downloaded models.")
+        dir_layout = QHBoxLayout()
+        dir_layout.addWidget(self.model_download_dir)
+        btn_dir = QPushButton("...")
+        btn_dir.setFixedWidth(32)
+        btn_dir.clicked.connect(self.browse_model_download_folder)
+        dir_layout.addWidget(btn_dir)
+        model_layout.addWidget(QLabel("Folder:"))
+        model_layout.addLayout(dir_layout)
+
+        self.model_size_tabs = QTabWidget()
+        self.model_versions = ["v8", "v10", "v11", "v12", "v26"]
+        size_tabs = [
+            ("N", "n"),
+            ("S", "s"),
+            ("M", "m"),
+            ("L", "l"),
+            ("X", "x"),
+        ]
+        for title, size_code in size_tabs:
+            tab = QWidget()
+            grid = QGridLayout()
+            grid.setHorizontalSpacing(8)
+            grid.setVerticalSpacing(6)
+            for idx, version in enumerate(self.model_versions):
+                model_name = self.get_model_name(version, size_code)
+                btn = QPushButton(model_name)
+                btn.setToolTip(f"Download {model_name}")
+                btn.clicked.connect(lambda _, v=version, s=size_code: self.download_yolo_variant(v, s))
+                row = idx // 2
+                col = idx % 2
+                grid.addWidget(btn, row, col)
+            tab.setLayout(grid)
+            self.model_size_tabs.addTab(tab, title)
+        model_layout.addWidget(self.model_size_tabs)
+
+        custom_layout = QHBoxLayout()
+        self.model_custom_input = QLineEdit()
+        self.model_custom_input.setPlaceholderText("Custom model name or URL")
+        self.model_custom_input.setToolTip("Example: yolov8n.pt or https://.../model.pt")
+        btn_custom = QPushButton("Download")
+        btn_custom.setToolTip("Download custom model or URL.")
+        btn_custom.clicked.connect(self.download_yolo_model)
+        custom_layout.addWidget(self.model_custom_input)
+        custom_layout.addWidget(btn_custom)
+        model_layout.addWidget(QLabel("Custom:"))
+        model_layout.addLayout(custom_layout)
+
+        note = QLabel("YOLO v26 weights may be unavailable; use a direct URL if needed.")
+        note.setWordWrap(True)
+        model_layout.addWidget(note)
+        model_group.setLayout(model_layout)
+        layout.addWidget(model_group, 3, 1)
+
         theme_group = QGroupBox("Theme")
         theme_layout = QFormLayout()
         self.theme_combo = QComboBox()
@@ -1426,6 +1714,67 @@ class YOLOApp(QWidget):
         if not apply_material_theme(app, theme=theme):
             apply_dark_theme(app)
         self.apply_ui_font(self.config.get("ui", {}).get("font_size", 11))
+
+    def open_label_verification(self):
+        script_path = Path(__file__).resolve().parent / "Core" / "labelConfig.py"
+        if not script_path.exists():
+            self.console.append("[ERROR] labelConfig.py not found.")
+            return
+        try:
+            if "label_data_folder" not in self.config:
+                self.config["label_data_folder"] = self.config.get("data_folder", "")
+                self.save_config()
+            subprocess.Popen([sys.executable, str(script_path)])
+            self.console.append("[INFO] Label verification opened.")
+        except Exception as e:
+            self.console.append(f"[ERROR] Failed to open label verification: {e}")
+
+    def browse_model_download_folder(self):
+        folder = QFileDialog.getExistingDirectory(self, "Select Folder", self.model_download_dir.text().strip())
+        if folder:
+            self.model_download_dir.setText(folder)
+
+    def get_model_name(self, version, size_code):
+        prefixes = {
+            "v8": "yolov8",
+            "v10": "yolov10",
+            "v11": "yolo11",
+            "v12": "yolo12",
+            "v26": "yolo26",
+        }
+        prefix = prefixes.get(version, "yolov8")
+        return f"{prefix}{size_code}.pt"
+
+    def download_yolo_variant(self, version, size_code):
+        model_name = self.get_model_name(version, size_code)
+        self.download_yolo_model(model_name)
+
+    def download_yolo_model(self, model_ref=None):
+        if model_ref is None:
+            model_ref = self.model_custom_input.text().strip()
+        dest_folder = self.model_download_dir.text().strip()
+        if not model_ref:
+            self.console.append("[ERROR] Model name or URL is empty.")
+            return
+        if not dest_folder:
+            self.console.append("[ERROR] Destination folder is empty.")
+            return
+        if hasattr(self, "model_download_thread") and self.model_download_thread.isRunning():
+            self.console.append("[INFO] Model download already in progress.")
+            return
+        self.model_download_thread = ModelDownloadThread(model_ref, dest_folder)
+        self.model_download_thread.log_signal.connect(self.log_to_console)
+        self.model_download_thread.finished.connect(self.on_model_download_finished)
+        self.model_download_thread.start()
+
+    def on_model_download_finished(self, ok, path):
+        if ok:
+            if path:
+                self.console.append(f"[INFO] Model ready: {path}")
+            else:
+                self.console.append("[INFO] Model download finished.")
+        else:
+            self.console.append("[ERROR] Model download failed.")
 
     def on_font_size_changed(self, size):
         self.config.setdefault("ui", {})["font_size"] = int(size)
@@ -1535,10 +1884,12 @@ class YOLOApp(QWidget):
         self.console.append(f"[INFO] Class map: {class_map}")
         self.console.append(f"[INFO] Detection threshold: {self.config.get('detection_threshold')}")
 
+        show_window = bool(self.config.get("ui", {}).get("show_capture_window", False))
         self.capture = ScreenCapture(
             config=self.config,
             output_folder=self.config["output_folder"],
-            log_callback=self.log_to_console
+            log_callback=self.log_to_console,
+            show_window=show_window
         )
 
         self.console.append("Starting data collection…")
@@ -1565,6 +1916,11 @@ class YOLOApp(QWidget):
         self.data_collection_active = False
         if hasattr(self, "btn_data_toggle"):
             self.btn_data_toggle.setText("Start Data Collection")
+
+    def on_capture_window_toggle(self, checked):
+        ui_cfg = self.config.setdefault("ui", {})
+        ui_cfg["show_capture_window"] = not checked
+        self.save_config()
 
     # -------- Training ----------
     def toggle_training(self):
@@ -1725,6 +2081,7 @@ class YOLOApp(QWidget):
             "save_interval": 6,
             "detection_threshold": 0.4,
             "data_folder": "stream/dataset",
+            "label_data_folder": "stream/dataset",
             "last_data_yaml": "datasets/data.yaml",
             "train_defaults": {
                 "epochs": 26,
