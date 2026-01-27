@@ -9,3 +9,4 @@ __pycache__/
 /utils/ffmpeg/
 /stream/
 /Cookies
+cookies.txt
