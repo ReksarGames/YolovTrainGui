@@ -558,7 +558,7 @@ class StreamCutDialog(QDialog):
         self.console.setMinimumHeight(150)
         layout.addWidget(self.console)
 
-        self._icon_downloaded = self.style().standardIcon(QStyle.SP_DialogApplyButton)
+        self._icon_downloaded = QIcon()
 
         self.setLayout(layout)
 
@@ -712,6 +712,9 @@ class StreamCutDialog(QDialog):
                 return match.group("id")
         if re.fullmatch(r"[\w-]+", url):
             return url
+        match = re.search(r"v(\d+)", url)
+        if match:
+            return match.group(1)
         try:
             import yt_dlp
             with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "ignoreconfig": True}) as ydl:
@@ -730,6 +733,10 @@ class StreamCutDialog(QDialog):
                     downloaded_ids = {line.strip() for line in f if line.strip()}
             except Exception as e:
                 self.log_to_console(f"[ERROR] Failed to read archive: {e}")
+        ids_from_archive = set()
+        for line in downloaded_ids:
+            for match in re.findall(r"\b\d{6,}\b", line):
+                ids_from_archive.add(match)
         downloaded_files = set()
         if raw_folder and os.path.isdir(raw_folder):
             try:
@@ -749,8 +756,20 @@ class StreamCutDialog(QDialog):
             if not vid:
                 item.setIcon(QIcon())
                 continue
-            if vid in downloaded_files or any(line.endswith(f":{vid}") or line == vid for line in downloaded_ids):
-                item.setIcon(self._icon_downloaded)
+            def line_matches(line):
+                if not line:
+                    return False
+                if line == vid or line.endswith(f":{vid}"):
+                    return True
+                if re.search(rf"\b{re.escape(vid)}\b", line):
+                    return True
+                parts = line.split()
+                return vid in parts
+
+            if (vid in downloaded_files or f"v{vid}" in downloaded_files
+                    or vid in ids_from_archive or any(line_matches(line) for line in downloaded_ids)):
+                item.setIcon(QIcon())
+                item.setCheckState(Qt.Checked)
                 marked += 1
             else:
                 item.setIcon(QIcon())
