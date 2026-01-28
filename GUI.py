@@ -267,6 +267,8 @@ class StreamCutDialog(QDialog):
         self.setGeometry(150, 150, 700, 700)
         self.config = {}
         self.stream_thread = None
+        self.download_dialogs = {}
+        self.download_dialog_order = []
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self.save_config)
@@ -274,12 +276,29 @@ class StreamCutDialog(QDialog):
         self.init_ui()
         self.load_config(self.config_path_input.text())
 
-    def create_download_dialog(self):
+    def create_download_dialog(self, source_key):
         dialog = QDialog(self)
         dialog.setWindowTitle("Download progress")
         dialog.setModal(False)
         dialog.setMinimumWidth(360)
-        layout = QFormLayout()
+        layout = QVBoxLayout()
+
+        nav_layout = QHBoxLayout()
+        dialog.prev_btn = QPushButton("<")
+        dialog.next_btn = QPushButton(">")
+        dialog.nav_label = QLabel("-/-")
+        dialog.source_key = source_key
+        dialog.prev_btn.setFixedWidth(28)
+        dialog.next_btn.setFixedWidth(28)
+        dialog.prev_btn.clicked.connect(lambda: self.focus_download_dialog(-1, dialog.source_key))
+        dialog.next_btn.clicked.connect(lambda: self.focus_download_dialog(1, dialog.source_key))
+        nav_layout.addWidget(dialog.prev_btn)
+        nav_layout.addWidget(dialog.nav_label)
+        nav_layout.addWidget(dialog.next_btn)
+        nav_layout.addStretch()
+        layout.addLayout(nav_layout)
+
+        form = QFormLayout()
 
         dialog.title_label = QLabel("-")
         dialog.size_label = QLabel("-")
@@ -289,12 +308,13 @@ class StreamCutDialog(QDialog):
         dialog.progress_bar = QProgressBar()
         dialog.progress_bar.setRange(0, 100)
 
-        layout.addRow("Title:", dialog.title_label)
-        layout.addRow("Size:", dialog.size_label)
-        layout.addRow("Downloaded:", dialog.downloaded_label)
-        layout.addRow("Speed:", dialog.speed_label)
-        layout.addRow("ETA:", dialog.eta_label)
-        layout.addRow("Progress:", dialog.progress_bar)
+        form.addRow("Title:", dialog.title_label)
+        form.addRow("Size:", dialog.size_label)
+        form.addRow("Downloaded:", dialog.downloaded_label)
+        form.addRow("Speed:", dialog.speed_label)
+        form.addRow("ETA:", dialog.eta_label)
+        form.addRow("Progress:", dialog.progress_bar)
+        layout.addLayout(form)
         dialog.setLayout(layout)
         return dialog
 
@@ -434,6 +454,12 @@ class StreamCutDialog(QDialog):
         btn_resume.clicked.connect(lambda: self.browse_save_file(self.resume_info_input, "Select resume file", "JSON Files (*.json);;All Files (*.*)"))
         resume_layout.addWidget(btn_resume)
         form.addRow("Resume info file:", resume_layout)
+
+        self.download_quality_input = QComboBox()
+        self.download_quality_input.addItems(["best", "720p", "360p"])
+        self.download_quality_input.setToolTip("Download quality limit for VODs.")
+        self.download_quality_input.currentTextChanged.connect(lambda _: self.schedule_save_config())
+        form.addRow("Download quality:", self.download_quality_input)
 
         self.pause_after_download_checkbox = QCheckBox("Pause after download")
         self.pause_after_download_checkbox.setToolTip("Ask before processing downloaded streams.")
@@ -624,6 +650,7 @@ class StreamCutDialog(QDialog):
         self.cookies_path_input.setText(self.config.get("twitch_cookies_path", ""))
         self.download_archive_input.setText(self.config.get("download_archive", ""))
         self.resume_info_input.setText(self.config.get("resume_info_file", ""))
+        self.download_quality_input.setCurrentText(self.config.get("download_quality", "best"))
         self.time_interval_input.setValue(int(self.config.get("time_interval", 1)))
         self.detection_threshold_input.setValue(float(self.config.get("detection_threshold", 0.5)))
         self.chunks_per_stream_input.setValue(int(self.config.get("chunks_per_stream", 1)))
@@ -649,6 +676,7 @@ class StreamCutDialog(QDialog):
         self.config["twitch_cookies_path"] = self.cookies_path_input.text().strip()
         self.config["download_archive"] = self.download_archive_input.text().strip()
         self.config["resume_info_file"] = self.resume_info_input.text().strip()
+        self.config["download_quality"] = self.download_quality_input.currentText().strip()
         self.config["time_interval"] = int(self.time_interval_input.value())
         self.config["detection_threshold"] = float(self.detection_threshold_input.value())
         self.config["chunks_per_stream"] = int(self.chunks_per_stream_input.value())
@@ -767,9 +795,8 @@ class StreamCutDialog(QDialog):
         self.stream_thread.finished.connect(self.on_streamcut_finished)
         self.stream_thread.start()
 
-        if self._stream_mode in ("download_only", "all"):
-            self.download_dialog = self.create_download_dialog()
-            self.download_dialog.show()
+        self.download_dialogs = {}
+        self.download_dialog_order = []
 
     def stop_streamcut(self):
         if self.stream_thread and self.stream_thread.isRunning():
@@ -785,8 +812,7 @@ class StreamCutDialog(QDialog):
             self.btn_run.setEnabled(True)
             self.btn_run.setText("Run StreamCut")
             self.btn_stop.setEnabled(False)
-            if hasattr(self, "download_dialog"):
-                self.download_dialog.close()
+            self.close_download_dialogs()
             return
 
         if self._stream_mode == "download_only":
@@ -818,20 +844,19 @@ class StreamCutDialog(QDialog):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Run StreamCut")
         self.btn_stop.setEnabled(False)
-        if hasattr(self, "download_dialog"):
-            self.download_dialog.close()
+        self.close_download_dialogs()
 
     def on_download_info(self, info):
-        if not hasattr(self, "download_dialog"):
-            return
+        key = info.get("source_key") or info.get("url") or info.get("title") or "download"
+        dialog = self.ensure_download_dialog(key)
         title = info.get("title", "-")
         size = self.format_size(info.get("size_bytes"))
-        self.download_dialog.title_label.setText(title)
-        self.download_dialog.size_label.setText(size)
+        dialog.title_label.setText(title)
+        dialog.size_label.setText(size)
 
     def on_download_progress(self, info):
-        if not hasattr(self, "download_dialog"):
-            return
+        key = info.get("source_key") or info.get("url") or info.get("title") or "download"
+        dialog = self.ensure_download_dialog(key)
         downloaded = self.format_size(info.get("downloaded_bytes"))
         total = self.format_size(info.get("total_bytes"))
         speed = self.format_size(info.get("speed_bytes")) + "/s" if info.get("speed_bytes") else "-"
@@ -842,10 +867,53 @@ class StreamCutDialog(QDialog):
             mins, secs = divmod(int(eta), 60)
             eta_str = f"{mins:02d}:{secs:02d}"
         percent = int(info.get("percent", 0))
-        self.download_dialog.downloaded_label.setText(f"{downloaded} / {total}")
-        self.download_dialog.speed_label.setText(speed)
-        self.download_dialog.eta_label.setText(eta_str)
-        self.download_dialog.progress_bar.setValue(percent)
+        dialog.downloaded_label.setText(f"{downloaded} / {total}")
+        dialog.speed_label.setText(speed)
+        dialog.eta_label.setText(eta_str)
+        dialog.progress_bar.setValue(percent)
+
+    def ensure_download_dialog(self, key):
+        if not key and len(self.download_dialogs) == 1:
+            return next(iter(self.download_dialogs.values()))
+        if key in self.download_dialogs:
+            return self.download_dialogs[key]
+        dialog = self.create_download_dialog(key)
+        self.download_dialogs[key] = dialog
+        self.download_dialog_order.append(key)
+        self.update_download_nav()
+        dialog.show()
+        return dialog
+
+    def update_download_nav(self):
+        total = max(1, len(self.download_dialog_order))
+        for idx, key in enumerate(self.download_dialog_order):
+            dialog = self.download_dialogs.get(key)
+            if dialog:
+                dialog.nav_label.setText(f"{idx + 1}/{total}")
+
+    def focus_download_dialog(self, offset, key):
+        if key not in self.download_dialog_order:
+            return
+        total = len(self.download_dialog_order)
+        if total == 0:
+            return
+        idx = self.download_dialog_order.index(key)
+        next_idx = (idx + offset) % total
+        next_key = self.download_dialog_order[next_idx]
+        dialog = self.download_dialogs.get(next_key)
+        if dialog:
+            dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+
+    def close_download_dialogs(self):
+        for dialog in self.download_dialogs.values():
+            try:
+                dialog.close()
+            except Exception:
+                pass
+        self.download_dialogs = {}
+        self.download_dialog_order = []
 
     def show_download_sizes(self):
         raw_folder = self.raw_stream_folder_input.text().strip()

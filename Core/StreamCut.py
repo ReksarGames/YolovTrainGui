@@ -55,6 +55,7 @@ class StreamCut:
         self.download_archive = cfg["download_archive"]
         self.resume_info_file = cfg["resume_info_file"]
         self.ffmpeg_path      = cfg["ffmpeg_path"]
+        self.download_quality = cfg.get("download_quality", "best")
 
         # ——— Модель ———
         self.model = YOLO(self.model_path)
@@ -111,59 +112,89 @@ class StreamCut:
                     if "twitch.tv" not in raw:
                         self.log("[WARNING] Cookies file does not contain twitch.tv; auth might fail.")
 
-        def progress_hook(d):
+        def build_opts(progress_hook):
+            opts = {
+                "outtmpl": os.path.join(self.raw_stream_folder, "%(id)s.%(ext)s"),
+                "format": self._get_download_format(),
+                "download_archive": self.download_archive,
+                "progress_hooks": [progress_hook],
+                "quiet": True,
+                "no_warnings": True,
+                "ignoreconfig": True,
+            }
+            if cookies_file:
+                opts["cookiefile"] = cookies_file
+            return opts
+
+        def download_one(url):
             if self.stop_flag:
-                raise DownloadCancelled()
-            if d.get("status") == "downloading":
-                total = d.get("total_bytes") or d.get("total_bytes_estimate")
-                downloaded = d.get("downloaded_bytes")
-                percent = 0
-                if total and downloaded:
-                    try:
-                        percent = int((downloaded / total) * 100)
-                    except Exception:
+                return
+            try:
+                def progress_hook(d):
+                    if self.stop_flag:
+                        raise DownloadCancelled()
+                    if d.get("status") == "downloading":
+                        total = d.get("total_bytes") or d.get("total_bytes_estimate")
+                        downloaded = d.get("downloaded_bytes")
                         percent = 0
-                info = {
-                    "title": d.get("info_dict", {}).get("title"),
-                    "total_bytes": total,
-                    "downloaded_bytes": downloaded,
-                    "speed_bytes": d.get("speed"),
-                    "eta": d.get("eta"),
-                    "percent": percent,
-                }
-                if self.on_download_progress:
-                    self.on_download_progress(info)
+                        if total and downloaded:
+                            try:
+                                percent = int((downloaded / total) * 100)
+                            except Exception:
+                                percent = 0
+                        info = {
+                            "title": d.get("info_dict", {}).get("title"),
+                            "total_bytes": total,
+                            "downloaded_bytes": downloaded,
+                            "speed_bytes": d.get("speed"),
+                            "eta": d.get("eta"),
+                            "percent": percent,
+                            "source_key": url,
+                            "url": url,
+                        }
+                        if self.on_download_progress:
+                            self.on_download_progress(info)
 
-        ydl_opts = {
-            "outtmpl": os.path.join(self.raw_stream_folder, "%(id)s.%(ext)s"),
-            "format": "best",
-            "download_archive": self.download_archive,
-            "progress_hooks": [progress_hook],
-            "quiet": True,
-            "no_warnings": True,
-            "ignoreconfig": True,
-        }
-
-        if cookies_file:
-            ydl_opts["cookiefile"] = cookies_file
-
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            for url in self.video_sources:
-                if self.stop_flag:
-                    break
-                try:
+                with yt_dlp.YoutubeDL(build_opts(progress_hook)) as ydl:
                     info = ydl.extract_info(url, download=False)
                     title = info.get("title")
                     size = info.get("filesize") or info.get("filesize_approx")
                     if self.on_download_info:
-                        self.on_download_info({"title": title, "size_bytes": size})
+                        self.on_download_info({"title": title, "size_bytes": size, "source_key": url, "url": url})
                     ydl.download([url])
-                    self.log(f"[DOWNLOAD] {url} (ok)")
-                except DownloadCancelled:
-                    self.log("[INFO] Download cancelled by user.")
+                self.log(f"[DOWNLOAD] {url} (ok)")
+            except DownloadCancelled:
+                self.log("[INFO] Download cancelled by user.")
+            except Exception as e:
+                self.log(f"[ERROR] Download failed for {url}: {e}")
+
+        if self.max_download_workers <= 1 or len(self.video_sources) <= 1:
+            for url in self.video_sources:
+                if self.stop_flag:
                     break
-                except Exception as e:
-                    self.log(f"[ERROR] Download failed for {url}: {e}")
+                download_one(url)
+            return
+
+        self.log(f"[DOWNLOAD] Using {self.max_download_workers} workers...")
+        with ThreadPoolExecutor(max_workers=self.max_download_workers) as ex:
+            futures = [ex.submit(download_one, url) for url in self.video_sources]
+            for fut in futures:
+                if self.stop_flag:
+                    break
+                try:
+                    fut.result()
+                except Exception:
+                    pass
+
+    def _get_download_format(self):
+        q = str(self.download_quality or "best").lower().strip()
+        if q in ("best", "max", "highest"):
+            return "best"
+        if q in ("720", "720p"):
+            return "best[height<=720]"
+        if q in ("360", "360p"):
+            return "best[height<=360]"
+        return q
 
     def _get_duration(self, path: Path) -> float:
         """Возвращает длительность видео в секундах через ffprobe.exe."""

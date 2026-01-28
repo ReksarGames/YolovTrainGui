@@ -1,6 +1,5 @@
 {
     "video_sources": [
-        "https://www.twitch.tv/videos/2621859861",
         "https://www.twitch.tv/videos/2675863699",
         "https://www.twitch.tv/videos/2676763373",
         "https://www.twitch.tv/videos/2677081731",
@@ -13,8 +12,8 @@
     "chunks_folder": "stream/chunks",
     "output_folder": "stream/dataset",
     "twitch_cookies_path": "Cookies",
-    "time_interval": 85,
-    "detection_threshold": 0.7,
+    "time_interval": 5,
+    "detection_threshold": 0.6,
     "model_path": "models/sunxds_0.7.6.pt",
     "classes": [
         "player",
@@ -39,8 +38,10 @@
     "resume_info_file": "stream/resume.json",
     "ffmpeg_path": "utils/ffmpeg/bin/ffmpeg.exe",
     "selected_video_sources": [
-        "https://www.twitch.tv/videos/2621859861"
+        "https://www.twitch.tv/videos/2675863699",
+        "https://www.twitch.tv/videos/2676763373"
     ],
     "use_selected_only": true,
-    "pause_after_download": true
+    "pause_after_download": true,
+    "download_quality": "best"
 }
