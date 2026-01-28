@@ -65,6 +65,8 @@
     },
     "ui": {
         "font_size": 10,
-        "theme": "dark_teal.xml"
-    }
+        "theme": "dark_teal.xml",
+        "show_capture_window": false
+    },
+    "label_data_folder": "E:/Project/PythonProjects/YolovTrainGui/datasets/hunt_realese"
 }
