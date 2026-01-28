@@ -269,6 +269,7 @@ class StreamCutDialog(QDialog):
         self.stream_thread = None
         self.download_dialogs = {}
         self.download_dialog_order = []
+        self._skipped_progress_keys = set()
         self._save_timer = QTimer(self)
         self._save_timer.setSingleShot(True)
         self._save_timer.timeout.connect(self.save_config)
@@ -802,6 +803,7 @@ class StreamCutDialog(QDialog):
             return
 
         self._download_start_ts = time.time()
+        self._skipped_progress_keys = set()
         self.btn_run.setEnabled(False)
         self.btn_run.setText("Running...")
         self.btn_stop.setEnabled(True)
@@ -867,6 +869,9 @@ class StreamCutDialog(QDialog):
 
     def on_download_info(self, info):
         key = info.get("source_key") or info.get("url") or info.get("title") or "download"
+        if key and self._is_already_downloaded(key):
+            self._skipped_progress_keys.add(key)
+            return
         dialog = self.ensure_download_dialog(key)
         title = info.get("title", "-")
         size = self.format_size(info.get("size_bytes"))
@@ -875,6 +880,8 @@ class StreamCutDialog(QDialog):
 
     def on_download_progress(self, info):
         key = info.get("source_key") or info.get("url") or info.get("title") or "download"
+        if key in self._skipped_progress_keys:
+            return
         dialog = self.ensure_download_dialog(key)
         downloaded = self.format_size(info.get("downloaded_bytes"))
         total = self.format_size(info.get("total_bytes"))
@@ -933,6 +940,31 @@ class StreamCutDialog(QDialog):
                 pass
         self.download_dialogs = {}
         self.download_dialog_order = []
+
+    def _is_already_downloaded(self, url_or_key):
+        vid = self._extract_id_from_url(url_or_key)
+        if not vid:
+            return False
+        raw_folder = self.raw_stream_folder_input.text().strip()
+        if raw_folder and os.path.isdir(raw_folder):
+            try:
+                for p in Path(raw_folder).glob("*.*"):
+                    if p.suffix in (".part", ".ytdl"):
+                        continue
+                    if vid in p.stem or f"v{vid}" in p.stem:
+                        return True
+            except Exception:
+                pass
+        archive_path = self.download_archive_input.text().strip()
+        if archive_path and os.path.isfile(archive_path):
+            try:
+                with open(archive_path, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        if vid in line:
+                            return True
+            except Exception:
+                pass
+        return False
 
     def show_download_sizes(self):
         raw_folder = self.raw_stream_folder_input.text().strip()
