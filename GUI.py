@@ -373,7 +373,8 @@ class StreamCutDialog(QDialog):
 
         self.classes_input = QTextEdit()
         self.classes_input.setPlaceholderText("One class per line")
-        self.classes_input.setToolTip("Class filter: keep only these classes.")
+        self.classes_input.setToolTip("Classes are synced with the main config.")
+        self.classes_input.setReadOnly(True)
         form.addRow("Classes:", self.classes_input)
 
         self.raw_stream_folder_input = QLineEdit()
@@ -629,6 +630,12 @@ class StreamCutDialog(QDialog):
             self.config = {}
             self.log_to_console(f"[ERROR] Failed to load config: {e}")
 
+        main_classes = []
+        parent = self.parent()
+        if parent and hasattr(parent, "config"):
+            main_classes = parent.config.get("classes", [])
+        if main_classes:
+            self.config["classes"] = list(main_classes)
         self.classes_input.setPlainText("\n".join(self.config.get("classes", [])))
         self.use_selected_only_checkbox.setChecked(bool(self.config.get("use_selected_only", True)))
         self.pause_after_download_checkbox.setChecked(bool(self.config.get("pause_after_download", True)))
@@ -668,7 +675,11 @@ class StreamCutDialog(QDialog):
         self.config["selected_video_sources"] = selected_sources
         self.config["use_selected_only"] = bool(self.use_selected_only_checkbox.isChecked())
         self.config["pause_after_download"] = bool(self.pause_after_download_checkbox.isChecked())
-        self.config["classes"] = [line.strip() for line in self.classes_input.toPlainText().splitlines() if line.strip()]
+        parent = self.parent()
+        if parent and hasattr(parent, "config") and parent.config.get("classes"):
+            self.config["classes"] = list(parent.config.get("classes", []))
+        else:
+            self.config["classes"] = [line.strip() for line in self.classes_input.toPlainText().splitlines() if line.strip()]
         self.config["raw_stream_folder"] = self.raw_stream_folder_input.text().strip()
         self.config["chunks_folder"] = self.chunks_folder_input.text().strip()
         self.config["output_folder"] = self.output_folder_input.text().strip()
@@ -1383,7 +1394,14 @@ class YOLOApp(QWidget):
         self.class_list = QListWidget()
         self.class_list.setMinimumHeight(140)
         self.class_list.setToolTip("Classes used for collection/labeling.")
+        self.class_list.setDragDropMode(QListWidget.InternalMove)
+        self.class_list.setDefaultDropAction(Qt.MoveAction)
+        self.class_list.model().rowsMoved.connect(self.on_classes_reordered)
         class_layout.addWidget(self.class_list)
+        hint = QLabel("Tip: drag classes to reorder (changes class indices for new labels).")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #aaa;")
+        class_layout.addWidget(hint)
         class_group.setLayout(class_layout)
         self.update_class_list()
 
@@ -1928,6 +1946,23 @@ class YOLOApp(QWidget):
             self.console.append(f"Class '{name}' removed.")
         else:
             self.console.append("No class selected.")
+
+    def on_classes_reordered(self, *args):
+        names = []
+        for i in range(self.class_list.count()):
+            text = self.class_list.item(i).text()
+            if ":" in text:
+                _, name = text.split(":", 1)
+                name = name.strip()
+            else:
+                name = text.strip()
+            if name:
+                names.append(name)
+        if names:
+            self.config["classes"] = names
+            self.save_config()
+            self.update_class_list()
+            self.console.append("[INFO] Classes reordered. New indices apply to new labels.")
 
     # -------- Train params persistence ----------
     def persist_train_params(self):
