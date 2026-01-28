@@ -328,6 +328,10 @@ A: Yes, all datasets are in standard YOLO format.
 **Q: What if I don't have a YOLO model yet?**  
 A: Use Model Manager to download v8/v12 presets, or train a basic one first.
 
+**Q: I stopped StreamCut mid‑process. What should I do?**  
+A: Delete `stream/resume.json` and желательно очистить `stream/dataset/` if you plan to re‑run.  
+Resume file tracks completed chunks; if you interrupted, it may mark them as finished.
+
 ---
 
 ## 👥 **Who This Is For**

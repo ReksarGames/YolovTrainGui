@@ -244,7 +244,7 @@ class StreamCut:
 
             seg_time = duration / self.chunks_per_stream
             out_pattern = os.path.join(self.chunks_folder, f"{base}_%03d.ts")
-            cmd = [
+            cmd_primary = [
                 self.ffmpeg_path, "-y",
                 "-hide_banner", "-loglevel", "error",
                 "-i", str(path),
@@ -254,11 +254,30 @@ class StreamCut:
                 "-segment_format", "mpegts",
                 out_pattern
             ]
+            cmd_fallback = [
+                self.ffmpeg_path, "-y",
+                "-hide_banner", "-loglevel", "error",
+                "-fflags", "+genpts",
+                "-avoid_negative_ts", "make_zero",
+                "-i", str(path),
+                "-map", "0:v", "-map", "0:a?",
+                "-c", "copy",
+                "-reset_timestamps", "1",
+                "-f", "segment",
+                "-segment_time", str(seg_time),
+                "-segment_format", "mpegts",
+                out_pattern
+            ]
             try:
-                subprocess.run(cmd, check=True)
+                subprocess.run(cmd_primary, check=True)
                 self.log(f"[SPLIT] {base} → {self.chunks_per_stream}×{seg_time:.1f}s")
-            except subprocess.CalledProcessError as e:
-                self.log(f"[ERROR] FFmpeg нарезка {base} упала: {e}")
+            except subprocess.CalledProcessError:
+                self.log(f"[WARN] FFmpeg primary split failed for {base}, trying fallback...")
+                try:
+                    subprocess.run(cmd_fallback, check=True)
+                    self.log(f"[SPLIT] {base} → {self.chunks_per_stream}×{seg_time:.1f}s (fallback)")
+                except subprocess.CalledProcessError as e:
+                    self.log(f"[ERROR] FFmpeg нарезка {base} упала: {e}")
 
         with ThreadPoolExecutor(max_workers=self.split_workers) as ex:
             if not self.stop_flag:
@@ -291,13 +310,14 @@ class StreamCut:
         # ——— Если задан class_names — фильтруем по имени, иначе сохраняем всё ———
         if hasattr(self, "class_names"):
             self.class_names = [str(n).strip().lower() for n in self.class_names]
-            self.class_index_map = {
-                orig_idx: new_idx
-                for new_idx, (orig_idx, name) in enumerate([
-                    (i, n) for i, n in self.original_classes.items()
-                    if n.lower() in self.class_names
-                ])
-            }
+            name_to_idx = {str(n).strip().lower(): i for i, n in self.original_classes.items()}
+            self.class_index_map = {}
+            for new_idx, name in enumerate(self.class_names):
+                orig_idx = name_to_idx.get(name)
+                if orig_idx is None:
+                    self.log(f"[WARNING] Class '{name}' not found in model.names.")
+                    continue
+                self.class_index_map[orig_idx] = new_idx
             self.log(f"[INFO] Используем классы: {self.class_index_map}")
         elif hasattr(self, "class_map"):
             self.class_map = {int(k): int(v) for k, v in self.class_map.items()}
