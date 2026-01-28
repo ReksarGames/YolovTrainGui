@@ -2,16 +2,8 @@
     "model_path": "E:/Project/PythonProjects/YolovTrainGui/models/sunxds_0.7.6.pt",
     "classes": [
         "player",
-        "bot",
-        "weapon",
-        "outline",
-        "dead_body",
-        "hideout_target_human",
-        "hideout_target_balls",
         "head",
-        "smoke",
-        "fire",
-        "third_person"
+        "hideout_target_human"
     ],
     "class_map": {
         "player": 0,
@@ -68,5 +60,5 @@
         "theme": "dark_teal.xml",
         "show_capture_window": false
     },
-    "label_data_folder": "E:/Project/PythonProjects/YolovTrainGui/datasets/hunt_realese"
+    "label_data_folder": "E:\\Project\\PythonProjects\\YolovTrainGui\\stream\\dataset"
 }

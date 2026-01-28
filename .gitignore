@@ -10,3 +10,5 @@ __pycache__/
 /stream/
 /Cookies
 cookies.txt
+configs/config.json
+configs/configStreamCut.json

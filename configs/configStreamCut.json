@@ -1,7 +1,6 @@
 {
     "video_sources": [
         "https://www.twitch.tv/videos/2675863699",
-        "https://www.twitch.tv/videos/2676763373",
         "https://www.twitch.tv/videos/2677081731",
         "https://www.twitch.tv/videos/2678568765",
         "https://www.twitch.tv/videos/2679621838",
@@ -12,21 +11,13 @@
     "chunks_folder": "stream/chunks",
     "output_folder": "stream/dataset",
     "twitch_cookies_path": "Cookies",
-    "time_interval": 5,
+    "time_interval": 24,
     "detection_threshold": 0.6,
     "model_path": "models/sunxds_0.7.6.pt",
     "classes": [
         "player",
-        "bot",
-        "weapon",
-        "outline",
-        "dead_body",
-        "hideout_target_human",
-        "hideout_target_balls",
         "head",
-        "smoke",
-        "fire",
-        "third_person"
+        "hideout_target_human"
     ],
     "chunks_per_stream": 16,
     "num_streams": 6,
@@ -39,7 +30,7 @@
     "ffmpeg_path": "utils/ffmpeg/bin/ffmpeg.exe",
     "selected_video_sources": [
         "https://www.twitch.tv/videos/2675863699",
-        "https://www.twitch.tv/videos/2676763373"
+        "https://www.twitch.tv/videos/2677081731"
     ],
     "use_selected_only": true,
     "pause_after_download": true,
