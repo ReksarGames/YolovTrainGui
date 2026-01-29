@@ -1804,7 +1804,7 @@ class YOLOApp(QWidget):
         model_group.setLayout(model_layout)
         layout.addWidget(model_group, 3, 1)
 
-        theme_group = QGroupBox("Theme")
+        theme_group = QGroupBox("Advanced")
         theme_layout = QFormLayout()
         self.theme_combo = QComboBox()
         self.theme_combo.setToolTip("Switch qt-material theme.")
@@ -1818,7 +1818,13 @@ class YOLOApp(QWidget):
         if current_theme in [self.theme_combo.itemText(i) for i in range(self.theme_combo.count())]:
             self.theme_combo.setCurrentText(current_theme)
         self.theme_combo.currentTextChanged.connect(self.on_theme_changed)
-        theme_layout.addRow("Theme:", self.theme_combo)
+        theme_row = QHBoxLayout()
+        theme_row.addWidget(self.theme_combo)
+        self.btn_create_yaml = QPushButton("Create YAML")
+        self.btn_create_yaml.setToolTip("Generate data.yaml from config classes.")
+        self.btn_create_yaml.clicked.connect(self.create_data_yaml)
+        theme_row.addWidget(self.btn_create_yaml)
+        theme_layout.addRow("Theme:", theme_row)
         theme_group.setLayout(theme_layout)
         layout.addWidget(theme_group, 3, 0)
 
@@ -2215,6 +2221,49 @@ class YOLOApp(QWidget):
             self.data_yaml_input.setText(path)
             self.config["last_data_yaml"] = path
             self.save_config()
+
+    def create_data_yaml(self):
+        root = QFileDialog.getExistingDirectory(self, "Select Dataset Root", self.config.get("data_folder", ""))
+        if not root:
+            self.console.append("[INFO] Create YAML cancelled.")
+            return
+
+        classes = self.config.get("classes", [])
+        if not classes:
+            self.console.append("[ERROR] No classes found in config.")
+            return
+
+        root_path = Path(root)
+        yaml_path = root_path / "data.yaml"
+
+        required_dirs = [
+            root_path / "train" / "images",
+            root_path / "val" / "images",
+            root_path / "test" / "images",
+        ]
+        for d in required_dirs:
+            if not d.exists():
+                self.console.append(f"[WARNING] Missing folder: {d}")
+
+        lines = [
+            f"path: {root}",
+            "train: train/images",
+            "val: val/images",
+            "test: test/images",
+            f"nc: {len(classes)}",
+            "names:",
+        ]
+        for name in classes:
+            lines.append(f"  - {json.dumps(str(name))}")
+
+        try:
+            yaml_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            self.data_yaml_input.setText(str(yaml_path))
+            self.config["last_data_yaml"] = str(yaml_path)
+            self.save_config()
+            self.console.append(f"[INFO] data.yaml created: {yaml_path}")
+        except Exception as e:
+            self.console.append(f"[ERROR] Failed to write data.yaml: {e}")
 
     def split_dataset(self):
         folder = QFileDialog.getExistingDirectory(self, "Select Dataset Folder", self.config.get("data_folder", ""))
