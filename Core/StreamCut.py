@@ -420,7 +420,7 @@ class StreamCut:
 
             cap.release()
             with resume_lock:
-                if base not in resume["processed_chunks"]:
+                if not self.stop_flag and base not in resume["processed_chunks"]:
                     resume["processed_chunks"].append(base)
                     with open(self.resume_info_file, 'w') as f:
                         json.dump(resume, f)
