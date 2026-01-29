@@ -157,6 +157,35 @@ class BenchmarkThread(QThread):
             self.log_signal.emit(f"[ERROR] Benchmark failed: {e}")
             self.finished.emit(False)
 
+# -------------------- Split Dataset Thread --------------------
+class SplitDatasetThread(QThread):
+    log_signal = pyqtSignal(str)
+    finished = pyqtSignal(bool)
+
+    def __init__(self, data_folder):
+        super().__init__()
+        self.data_folder = data_folder
+
+    def run(self):
+        try:
+            script_path = Path(__file__).resolve().parent / "Core" / "splitDatasetFiles.py"
+            cmd = [sys.executable, str(script_path), "--data-folder", self.data_folder]
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+            )
+            for line in proc.stdout:
+                self.log_signal.emit(line.rstrip())
+            proc.wait()
+            self.finished.emit(proc.returncode == 0)
+        except Exception as e:
+            self.log_signal.emit(f"[ERROR] Split failed: {e}")
+            self.finished.emit(False)
+
 # -------------------- Model Download Thread --------------------
 class ModelDownloadThread(QThread):
     log_signal = pyqtSignal(str)
@@ -2192,9 +2221,20 @@ class YOLOApp(QWidget):
         if not folder:
             self.console.append("[INFO] Split cancelled.")
             return
+        if hasattr(self, "split_thread") and self.split_thread.isRunning():
+            self.console.append("[INFO] Split is already running.")
+            return
         self.console.append(f"Splitting dataset: {folder}")
-        script_path = Path(__file__).resolve().parent / "Core" / "splitDatasetFiles.py"
-        subprocess.Popen([sys.executable, str(script_path), "--data-folder", folder])
+        self.split_thread = SplitDatasetThread(folder)
+        self.split_thread.log_signal.connect(self.log_to_console)
+        self.split_thread.finished.connect(self.on_split_finished)
+        self.split_thread.start()
+
+    def on_split_finished(self, ok):
+        if ok:
+            self.console.append("[INFO] Split finished.")
+        else:
+            self.console.append("[ERROR] Split finished with errors.")
 
     def open_config_dialog(self):
         dlg = ConfigDialog(self.config, self.config_path)

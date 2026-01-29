@@ -3,7 +3,17 @@ import shutil
 import random
 import json
 import argparse
+import time
 from pathlib import Path
+
+
+def _format_duration(seconds):
+    seconds = int(max(0, seconds))
+    minutes, sec = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours:d}:{minutes:02d}:{sec:02d}"
+    return f"{minutes:d}:{sec:02d}"
 
 
 # Функция для создания необходимых директорий в папке split
@@ -18,6 +28,12 @@ def create_dirs(output_base_dir):
 def split_dataset(images_dir, labels_dir, output_base_dir, train_ratio=0.8, val_ratio=0.1, test_ratio=0.1):
     image_files = [f for f in os.listdir(images_dir) if f.endswith('.jpg')]
     random.shuffle(image_files)
+    total_files = len(image_files)
+    moved_count = 0
+    processed_count = 0
+    skipped_missing = 0
+    last_log_time = time.time()
+    start_time = last_log_time
 
     # Рассчитываем количество файлов для train, val и test
     train_count = int(len(image_files) * train_ratio)
@@ -29,15 +45,27 @@ def split_dataset(images_dir, labels_dir, output_base_dir, train_ratio=0.8, val_
     val_files = image_files[train_count:train_count + val_count]
     test_files = image_files[train_count + val_count:]
 
+    def _log_progress():
+        elapsed = time.time() - start_time
+        remaining = total_files - processed_count
+        if processed_count > 0 and elapsed > 0:
+            rate = processed_count / elapsed
+            eta = remaining / rate if rate > 0 else 0
+            print(f"Progress: moved {moved_count}, remaining {remaining}, elapsed {_format_duration(elapsed)}, eta ~{_format_duration(eta)}", flush=True)
+        else:
+            print(f"Progress: moved {moved_count}, remaining {remaining}", flush=True)
+
     # Разделяем файлы в соответствующие папки
     for split, files in zip(['train', 'val', 'test'], [train_files, val_files, test_files]):
         for file in files:
+            processed_count += 1
             image_path = os.path.join(images_dir, file)
             label_path = os.path.join(labels_dir, file.replace('.jpg', '.txt'))
 
             # Проверяем, что метка для изображения существует
             if not os.path.exists(label_path):
-                print(f"Warning: Label file {label_path} for image {file} does not exist. Skipping this file.")
+                skipped_missing += 1
+                print(f"Warning: Label file {label_path} for image {file} does not exist. Skipping this file.", flush=True)
                 continue  # Пропускаем, если метка не найдена
 
             output_image_path = os.path.join(output_base_dir, split, 'images', file)
@@ -46,8 +74,16 @@ def split_dataset(images_dir, labels_dir, output_base_dir, train_ratio=0.8, val_
             # Копируем изображения и метки
             shutil.copy(image_path, output_image_path)
             shutil.copy(label_path, output_label_path)
+            moved_count += 1
 
-    print(f"Dataset split into train ({len(train_files)}), val ({len(val_files)}), and test ({len(test_files)}) sets.")
+            if time.time() - last_log_time >= 10:
+                _log_progress()
+                last_log_time = time.time()
+
+    _log_progress()
+    print(f"Dataset split into train ({len(train_files)}), val ({len(val_files)}), and test ({len(test_files)}) sets.", flush=True)
+    if skipped_missing > 0:
+        print(f"Skipped (missing labels): {skipped_missing}", flush=True)
 
 
 # Загрузка конфигурации из файла
