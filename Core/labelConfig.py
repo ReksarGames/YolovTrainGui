@@ -10,6 +10,8 @@ current_labels = []
 image_copy = None
 class_names = {}
 current_class_id = 0
+jump_mode = False
+jump_buffer = ""
 
 class_colors = {}
 
@@ -116,12 +118,16 @@ def display_current_class(image):
     cv2.putText(image, text, (10, 30), font, 1, (255, 255, 255), 2, cv2.LINE_AA)
 
 
-def update_image_window(image):
+def update_image_window(image, counter_text=None):
     if image is None:
         return
     view = image.copy()
     display_current_class(view)
     draw_hotkeys(view)
+    if counter_text:
+        draw_counter(view, counter_text)
+    if jump_mode:
+        draw_jump_prompt(view)
     cv2.imshow('Image with Labels', view)
     cv2.waitKey(1)
 
@@ -138,6 +144,7 @@ def draw_hotkeys(image):
     lines = [
         "Hotkeys: D=save+next  A=save+prev  W/S=class  H=delete  Q=quit",
         "Mouse: RMB drag=add box  LMB drag=remove box",
+        "Jump: J=go to index (type digits, Enter)",
     ]
     font = cv2.FONT_HERSHEY_SIMPLEX
     font_scale = 0.5
@@ -155,6 +162,31 @@ def draw_hotkeys(image):
     for line in lines:
         cv2.putText(image, line, (10, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
         y += line_height
+
+
+def draw_counter(image, text):
+    h, w = image.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.6
+    thickness = 1
+    (tw, th), _ = cv2.getTextSize(text, font, font_scale, thickness)
+    x = w - tw - 10
+    y = h - 8
+    cv2.rectangle(image, (x - 6, y - th - 6), (w - 4, y + 6), (0, 0, 0), -1)
+    cv2.putText(image, text, (x, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
+
+
+def draw_jump_prompt(image):
+    h, w = image.shape[:2]
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = 0.6
+    thickness = 1
+    prompt = f"Go to: {jump_buffer}"
+    (tw, th), _ = cv2.getTextSize(prompt, font, font_scale, thickness)
+    x = 10
+    y = 60
+    cv2.rectangle(image, (x - 6, y - th - 6), (x + tw + 6, y + 6), (0, 0, 0), -1)
+    cv2.putText(image, prompt, (x, y), font, font_scale, (255, 255, 255), thickness, cv2.LINE_AA)
 
 
 def click_and_crop(event, x, y, flags, param):
@@ -252,7 +284,7 @@ def save_labels(label_path):
 
 
 def browse_images(data_folder):
-    global image_copy, current_class_id
+    global image_copy, current_class_id, jump_mode, jump_buffer
 
     image_folder = os.path.join(data_folder, 'images')
     label_folder = os.path.join(data_folder, 'labels')
@@ -285,7 +317,7 @@ def browse_images(data_folder):
         image_copy = image.copy()
 
         if image is not None:
-            update_image_window(image_copy)
+            update_image_window(image_copy, f"{current_image_index + 1}/{len(image_files)}")
             cv2.setMouseCallback("Image with Labels", click_and_crop)
 
         print(f"Current Class: {class_names[current_class_id]}")
@@ -298,6 +330,28 @@ def browse_images(data_folder):
             key = cv2.waitKey(30)
             if key != -1:
                 break
+
+        if jump_mode:
+            if key == 27:  # ESC
+                jump_mode = False
+                jump_buffer = ""
+            elif key in (8, 127):  # backspace
+                jump_buffer = jump_buffer[:-1]
+            elif key in (13, 10):  # enter
+                if jump_buffer.isdigit():
+                    target = int(jump_buffer) - 1
+                    if 0 <= target < len(image_files):
+                        current_image_index = target
+                    else:
+                        print("Index out of range.")
+                else:
+                    print("Invalid index.")
+                jump_mode = False
+                jump_buffer = ""
+            elif 48 <= key <= 57:  # digits
+                jump_buffer += chr(key)
+            update_image_window(image_copy, f"{current_image_index + 1}/{len(image_files)}")
+            continue
 
         if key == ord('d'):
             # Save changes and move to the next image
@@ -320,14 +374,21 @@ def browse_images(data_folder):
             image_files = list_images()
             if current_image_index >= len(image_files):
                 current_image_index = len(image_files) - 1
+            update_image_window(image_copy, f"{current_image_index + 1}/{len(image_files)}")
+        elif key == ord('j'):
+            jump_mode = True
+            jump_buffer = ""
+            update_image_window(image_copy, f"{current_image_index + 1}/{len(image_files)}")
         elif key == ord('q'):
             break
         elif key == ord('w'):
             # Switching to the next class
             switch_class(direction=1)
+            update_image_window(image_copy, f"{current_image_index + 1}/{len(image_files)}")
         elif key == ord('s'):
             # Switch to previous class
             switch_class(direction=-1)
+            update_image_window(image_copy, f"{current_image_index + 1}/{len(image_files)}")
 
     cv2.destroyAllWindows()
 
